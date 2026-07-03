@@ -87,7 +87,7 @@ variables so they're a no-op otherwise:
 - `sync_to_website_enabled` — build the repo on one host, serve it from a separate
   public web host (systemd timer that rsyncs between them).
 - `debs2sql_enabled` — mirror package metadata into a MySQL database via the
-  external `debs2sql` tool, for sites building their own search UI on top of a DB.
+  external [`debs2sql`](https://github.com/VitexSoftware/DEBs-to-SQL) tool, for sites building their own search UI on top of a DB.
 - `mastodon_access_token` — toot an announcement to a Mastodon account whenever new
   snapshots go out.
 - `repo_logo` / `repo_badge` / `repo_org_name` / `repo_org_url` / `repo_org_description`
