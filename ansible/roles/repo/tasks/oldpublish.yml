@@ -1,0 +1,55 @@
+---
+- name: Check already Published
+  ansible.builtin.shell:
+    cmd: "aptly publish -raw list | awk ' { t = $1; $1 = $2; $2 = t; print; } '"
+  register: published_raw
+  changed_when: published_raw.rc != 0
+  ignore_errors: true
+
+- name: Use published list as fact
+  ansible.builtin.set_fact:
+    published: "{{ published_raw.stdout_lines if published_raw.stdout_lines is iterable else [] }}"
+
+- name: Published yet
+  ansible.builtin.debug:
+    var: published
+
+- name: Repos already present
+  ansible.builtin.command: "aptly repo list -raw"
+  register: repos_present_raw
+  changed_when: repos_present_raw
+
+- name: Check todays Snapshots
+  ansible.builtin.shell:
+    cmd: "aptly snapshot -raw list | grep  {{ today }}"
+  register: snapshots_raw
+  changed_when: snapshots_raw.rc != 0
+  ignore_errors: true
+
+- name: Repos we got
+  ansible.builtin.set_fact:
+    repos_we_got: "{{ repos_present_raw.stdout_lines }}"
+    snapshots_today: "{{ snapshots_raw.stdout_lines }}"
+
+- name: Publish todays Snapshots
+  ansible.builtin.include_tasks: "subtask/publish-distro-endpoint.yml"
+  loop: "{{ repos }}"
+  loop_control:
+    loop_var: distro_endpoints
+
+# - name: Update Repo graph
+#   command:
+#     cmd: "aptly graph -format=svg -output={{ repo_public }}/repograph.svg"
+#   register: ret
+#   changed_when: "'Output saved to ' in ret.stdout"
+#   become_user: '{{ repo_user }}'
+
+- name: Published
+  ansible.builtin.command:
+    cmd: "aptly publish -raw list"
+  register: published_raw
+  changed_when: published_raw.rc != 0
+
+- name: "All Published yet"
+  ansible.builtin.debug:
+    var: published_raw

@@ -1,0 +1,16 @@
+[Unit]
+Description=Sync Example Org Repository to Website
+After=network.target
+Requires=sync-repo-to-website.timer
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/sync-repo-to-website.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=repo-website-sync
+User=vitex
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

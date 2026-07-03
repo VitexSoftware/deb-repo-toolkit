@@ -1,0 +1,4 @@
+---
+- name: Include Requested repo task
+  ansible.builtin.include_tasks:
+    file: "{{ repo_action }}.yml"

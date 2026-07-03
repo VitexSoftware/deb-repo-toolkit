@@ -1,0 +1,10 @@
+---
+- name: 'SnapshotString {{ snapshot }}'
+  ansible.builtin.set_fact:
+    snapshot_string: "Snapshot `{{ snapshot }}` has been dropped."
+
+- name: 'Drop snapshoted {{ snapshot }}'
+  ansible.builtin.command:
+    cmd: "aptly snapshot drop {{ snapshot }}"
+  changed_when: 'snapshot_string in dropped.stdout'
+  register: dropped

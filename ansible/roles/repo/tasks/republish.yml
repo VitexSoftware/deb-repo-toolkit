@@ -1,0 +1,13 @@
+---
+- name: Repo unpublish
+  ansible.builtin.include_tasks: unpublish.yml
+
+- name: Repo unsnapshot
+  ansible.builtin.include_tasks: unsnapshot.yml
+
+- name: Repo Resnapshot
+  ansible.builtin.include_tasks: snapshot.yml
+
+- name: Repo Republish
+  ansible.builtin.include_tasks: publish.yml
+

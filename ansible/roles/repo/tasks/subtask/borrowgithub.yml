@@ -1,0 +1,46 @@
+---
+- name: "Get latest release of {{ package.user + '/' + package.repo }}"
+  community.general.github_release:
+    token: "{{ github.token }}"
+    user: "{{ package.user }}"
+    repo: "{{ package.repo }}"
+    action: latest_release
+  register: release
+
+- name: Prepare package version
+  ansible.builtin.set_fact:
+    package_version: '{{ release.tag | replace("v", "") }}'
+
+- name: Prepare Package filename
+  ansible.builtin.set_fact:
+    package_file: '{{ package.deb | replace("VERSION", package_version) }}'
+
+- name: Download Url
+  ansible.builtin.set_fact:
+    deb_url: "https://github.com/{{ package.user }}/{{ package.repo }}/releases/download/{{ release.tag }}/{{ package_file }}"
+
+- name: "Download {{ package_file }}"
+  ansible.builtin.get_url:
+    url: "{{ deb_url }}"
+    dest: "/tmp/{{ package_file }}"
+    mode: "0440"
+  failed_when: download_result.status_code != 200
+  ignore_errors: true
+  register: download_result
+
+- name: Show Download Result
+  ansible.builtin.debug:
+    var: download_result
+
+- name: Add Package to repository
+  ansible.builtin.command: "aptly repo -remove-files add borrow-main-{{ repo_keyword }} /tmp/{{ package_file }}"
+  register: repoadd
+  when: download_result is succeeded
+  failed_when: repoadd.rc != 0 or "added" not in repoadd.stdout
+  changed_when: '"added" in repoadd.stdout'
+
+- name: Clean Up
+  ansible.builtin.file:
+    path: "/tmp/{{ package_file }}"
+    state: absent
+  when: download_result is succeeded

@@ -1,0 +1,43 @@
+# Example vars for the "repo" role. Copy this file, rename it, and fill in
+# your own values — this is the only file you should need to touch to stand
+# up your own apt repository with the same aptly + DEP-11 + package-browser
+# setup documented in the top-level README.
+today: "{{ lookup('pipe', 'date +%F') }}"
+repo_name: "Ansible managed DEB repository"
+repo_user: "jenkins"
+repo_home: "/var/lib/jenkins/workspace/rebuild-deb-repo"
+repo_public: "/var/www/html/repo.example.com"
+repo_domain: "repo.example.com"
+# Used as a suffix on aptly repo names, e.g. "bookworm-main-myrepo".
+repo_keyword: "myrepo"
+repo_admin_email: "admin@example.com"
+# repo_logo: "myrepo-logo.png"          # optional, place next to this file
+# repo_badge: "myrepo-badge.png"        # optional
+# repo_org_name: "My Organization"      # optional, shown in the page footer
+# repo_org_url: "https://example.com/"  # optional
+# repo_org_description: "We build and support open-source tooling."
+aptly_bin: "aptly"
+passphrasefile: /var/lib/jenkins/.gnupg/repo-key-passphrase.txt
+
+# One top-level key per "publish_endpoint" (aptly FileSystemPublishEndpoint
+# name in /etc/aptly.conf). Under each: one key per distro family (its name
+# only matters for the Debian/Ubuntu/Other grouping in the package browser —
+# anything not literally "debian" or "ubuntu" lands under "Other"), then one
+# key per release, then a list of extra components beyond "main"
+# (backports/games/etc — "borrowed" is handled by tasks/borrow.yml, which
+# pulls third-party .debs from GitHub releases; skip it if you don't need it).
+repos:
+  - myrepo:
+      - debian:
+          - bookworm:
+              - backports
+          - trixie:
+              - backports
+
+      - ubuntu:
+          - jammy:
+          - noble:
+
+repo_architectures:
+  - amd64
+  - arm64

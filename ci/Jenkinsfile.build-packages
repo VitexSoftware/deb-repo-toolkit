@@ -1,0 +1,338 @@
+// Example Jenkins pipeline: build a set of Debian-packaged projects in
+// dependency order and add the resulting .debs to your aptly repos.
+//
+// This is a *pattern*, not a drop-in tool: the buildLevels maps below are
+// example data (fill in your own project names/paths and their build
+// order — projects in the same level build in whatever order Groovy's
+// Map.each gives you, so only put projects with no dependency on each
+// other in the same level). REPO_KEYWORD must match the repo_keyword you
+// used in your Ansible vars (see ansible/vars/example-repo.yml).
+pipeline {
+    agent any
+
+    parameters {
+        choice(
+            name: 'BUILD_SCOPE',
+            choices: ['test', 'essential', 'all'],
+            description: 'Scope of packages to build:\n- test: a handful of projects only\n- essential: core packages only\n- all: everything'
+        )
+        booleanParam(
+            name: 'FORCE_REBUILD',
+            defaultValue: false,
+            description: 'Force rebuild even if packages already exist'
+        )
+    }
+
+    environment {
+        BASE_DIR = '/home/YOUR_USER/Projects/YourOrg'
+        PACKAGE_OUTPUT = '/tmp/repo-build-${BUILD_NUMBER}'
+        REPO_KEYWORD = 'myrepo'
+    }
+
+    stages {
+        stage('Discover Projects') {
+            steps {
+                script {
+                    echo "🔍 Discovering projects with Debian packaging..."
+
+                    // Find all projects with Debian packaging
+                    def projects = sh(
+                        script: "find ${BASE_DIR} -maxdepth 2 -name 'debian' -type d | grep -v vendor | sed 's|/debian||g' | sort",
+                        returnStdout: true
+                    ).trim().split('\n')
+
+                    echo "Found ${projects.size()} projects with Debian packaging:"
+                    projects.each { project ->
+                        def name = project.split('/').last()
+                        echo "  - ${name}"
+                    }
+
+                    // Store projects for later stages
+                    env.PROJECTS = projects.join(',')
+
+                    // Example: a curated subset you consider "essential" —
+                    // replace with your own project names.
+                    def essentialProjects = [
+                        'my-core-library',
+                        'my-web-library',
+                        'my-cli-tool'
+                    ]
+
+                    env.ESSENTIAL_PROJECTS = essentialProjects.join(',')
+                }
+            }
+        }
+        
+        stage('Build Packages (Dependency-Aware)') {
+            steps {
+                script {
+                    echo "🔨 Building packages in dependency order..."
+
+                    // Create output directory
+                    sh "mkdir -p ${PACKAGE_OUTPUT}"
+
+                    // Define dependency-aware build levels. Replace with your
+                    // own projects: each numbered level builds after the
+                    // previous one finishes, so put a project's dependencies
+                    // in an earlier level than the project itself.
+                    def buildLevels = [:]
+
+                    if (params.BUILD_SCOPE == 'test') {
+                        buildLevels = [
+                            1: [
+                                'my-build-tool': "${BASE_DIR}/my-build-tool"
+                            ],
+                            2: [
+                                'my-core-library': "${BASE_DIR}/my-core-library"
+                            ],
+                            3: [
+                                'my-web-library': "${BASE_DIR}/my-web-library"
+                            ]
+                        ]
+                    } else if (params.BUILD_SCOPE == 'essential') {
+                        buildLevels = [
+                            1: [
+                                'my-build-tool': "${BASE_DIR}/my-build-tool"
+                            ],
+                            2: [
+                                'my-core-library': "${BASE_DIR}/my-core-library"
+                            ],
+                            3: [
+                                'my-web-library': "${BASE_DIR}/my-web-library",
+                                'my-db-library': "${BASE_DIR}/my-db-library"
+                            ],
+                            4: [
+                                'my-cli-tool': "${BASE_DIR}/my-cli-tool"
+                            ]
+                        ]
+                    } else {
+                        // Full build - add every project you maintain, split
+                        // into as many dependency levels as you need.
+                        buildLevels = [
+                            1: [
+                                'my-build-tool': "${BASE_DIR}/my-build-tool"
+                            ],
+                            2: [
+                                'my-core-library': "${BASE_DIR}/my-core-library"
+                            ],
+                            3: [
+                                'my-web-library': "${BASE_DIR}/my-web-library",
+                                'my-db-library': "${BASE_DIR}/my-db-library"
+                            ],
+                            4: [
+                                'my-cli-tool': "${BASE_DIR}/my-cli-tool"
+                            ]
+                            // Additional levels can be added here for 'all' scope
+                        ]
+                    }
+                    
+                    def totalBuilt = 0
+                    def totalFailed = 0
+                    def failedProjects = []
+                    
+                    // Build each level sequentially, packages within level in parallel
+                    buildLevels.each { level, packages ->
+                        echo "\\n🏗️ Building Level ${level} (${packages.size()} packages)..."
+                        
+                        packages.each { packageName, projectPath ->
+                            echo "  🔨 Building ${packageName}..."
+                            
+                            if (!fileExists("${projectPath}/debian/control")) {
+                                echo "  ⚠️ No debian/control found for ${packageName}, skipping"
+                                return
+                            }
+                            
+                            try {
+                                def buildResult = sh(
+                                    script: '''
+                                        cd "''' + projectPath + '''"
+                                        
+                                        # Install build dependencies
+                                        echo "Installing build dependencies for ''' + packageName + '''..."
+                                        if command -v mk-build-deps >/dev/null 2>&1; then
+                                            sudo mk-build-deps --install --remove --tool="apt-get -o Debug::pkgProblemResolver=yes --no-install-recommends -y" debian/control || true
+                                        fi
+                                        
+                                        # Clean any previous build
+                                        debian/rules clean 2>/dev/null || true
+                                        
+                                        # Build the package
+                                        dpkg-buildpackage -b -uc -us
+                                        
+                                        # Move built packages to output directory
+                                        find .. -maxdepth 1 -name "*.deb" -newer debian/control -exec mv {} "''' + env.PACKAGE_OUTPUT + '''/" \\; 2>/dev/null || true
+                                    ''',
+                                    returnStatus: true
+                                )
+                                
+                                if (buildResult == 0) {
+                                    echo "  ✅ Successfully built ${packageName}"
+                                    totalBuilt++
+                                } else {
+                                    echo "  ❌ Failed to build ${packageName}"
+                                    failedProjects.add(packageName)
+                                    totalFailed++
+                                }
+                                
+                            } catch (Exception e) {
+                                echo "  ❌ Exception building ${packageName}: ${e.getMessage()}"
+                                failedProjects.add(packageName)
+                                totalFailed++
+                            }
+                        }
+                        
+                        echo "  ✨ Level ${level} completed"
+                    }
+                    
+                    echo "\\n📊 Final Build Summary:"
+                    echo "   - Successfully built: ${totalBuilt}"
+                    echo "   - Failed: ${totalFailed}"
+                    
+                    if (failedProjects.size() > 0) {
+                        echo "   - Failed projects: ${failedProjects.join(', ')}"
+                    }
+                    
+                    // List all built packages
+                    def packageList = sh(
+                        script: "ls -1 ${PACKAGE_OUTPUT}/*.deb 2>/dev/null | wc -l",
+                        returnStdout: true
+                    ).trim()
+                    
+                    echo "\\n📦 Total packages built: ${packageList}"
+                    
+                    if (packageList.toInteger() > 0) {
+                        sh "ls -1 ${PACKAGE_OUTPUT}/*.deb | sed 's|.*/||' | sort"
+                    }
+                }
+            }
+        }
+        
+        stage('Add to Repository') {
+            steps {
+                script {
+                    echo "📦 Adding built packages to Aptly repositories..."
+                    
+                    def addResult = sh(
+                        script: '''
+                            cd "''' + env.PACKAGE_OUTPUT + '''"
+                            
+                            # Check if we have packages to add
+                            if [ ! -f *.deb ] 2>/dev/null; then
+                                echo "No packages to add"
+                                exit 0
+                            fi
+                            
+                            added_count=0
+                            
+                            for package in *.deb; do
+                                if [ -f "$package" ]; then
+                                    echo "Processing $package..."
+                                    
+                                    # Extract package info
+                                    BASENAME=$(basename "$package")
+                                    DEB=$(echo "$BASENAME" | awk -F_ '{print $1}')
+                                    
+                                    # Determine distribution (default to forky)
+                                    DISTRO="forky"
+                                    if [[ $package =~ ~([^_]+) ]]; then
+                                        DISTRO="${BASH_REMATCH[1]}"
+                                    fi
+                                    
+                                    echo "  Adding $DEB to ${DISTRO}-main-$REPO_KEYWORD"
+
+                                    # Add to repository
+                                    export HOME=/var/lib/jenkins
+                                    export GNUPGHOME=/var/lib/jenkins/.gnupg
+
+                                    # Remove existing version
+                                    aptly repo remove ${DISTRO}-main-$REPO_KEYWORD $DEB 2>/dev/null || true
+
+                                    # Add new package
+                                    if aptly repo add ${DISTRO}-main-$REPO_KEYWORD "$package"; then
+                                        echo "  ✅ Successfully added $DEB"
+                                        added_count=$((added_count + 1))
+                                    else
+                                        echo "  ❌ Failed to add $DEB"
+                                    fi
+                                fi
+                            done
+                            
+                            echo "Total packages added to repositories: $added_count"
+                        ''',
+                        returnStatus: true
+                    )
+                    
+                    if (addResult == 0) {
+                        echo "✅ Packages successfully added to repositories"
+                    } else {
+                        echo "⚠️ Some packages failed to be added to repositories"
+                        currentBuild.result = 'UNSTABLE'
+                    }
+                }
+            }
+        }
+        
+        stage('Repository Status') {
+            steps {
+                script {
+                    echo "📊 Checking repository status after package addition..."
+                    
+                    sh '''
+                        export HOME=/var/lib/jenkins
+                        export GNUPGHOME=/var/lib/jenkins/.gnupg
+                        
+                        echo "Repository contents:"
+                        aptly repo list
+                        
+                        echo "\\nTop repositories by package count:"
+                        for repo in $(aptly repo list -raw | head -10); do
+                            count=$(aptly repo show -with-packages $repo 2>/dev/null | grep -c "^  " || echo "0")
+                            echo "  $repo: $count packages"
+                        done
+                    '''
+                }
+            }
+        }
+        
+        stage('Trigger Repository Rebuild') {
+            steps {
+                script {
+                    echo "🔄 Triggering repository snapshot and publish..."
+                    
+                    // Trigger the main repository rebuild pipeline
+                    // (see Jenkinsfile.rebuild in this same directory)
+                    build job: 'rebuild-deb-repo',
+                          wait: false,
+                          parameters: [
+                              string(name: 'TRIGGERED_BY', value: "Package Build #${BUILD_NUMBER}")
+                          ]
+                    
+                    echo "✅ Repository rebuild triggered"
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                echo "\\n🧹 Cleaning up build artifacts..."
+                sh "rm -rf ${PACKAGE_OUTPUT} || true"
+                
+                echo "\\n📋 Build completed with status: ${currentBuild.result ?: 'SUCCESS'}"
+            }
+        }
+        success {
+            echo "✅ All packages built and added to repository successfully!"
+            echo "🌐 Check repository at: https://YOUR_REPO_DOMAIN/ (repo_domain in your ansible vars file)"
+        }
+        unstable {
+            echo "⚠️ Package build completed with some warnings."
+            echo "Check the logs above for details about failed packages."
+        }
+        failure {
+            echo "❌ Package build failed."
+            echo "Check the logs above for error details."
+        }
+    }
+}

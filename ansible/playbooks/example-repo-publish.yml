@@ -1,0 +1,16 @@
+---
+# Publishes (or republishes) the apt repository described in
+# vars/example-repo.yml, using the "repo" role.
+#
+# repo_action can be:
+#   create     - first-time setup: aptly repos + GPG key
+#   publish    - regenerate DEP-11/icons, sign, write README/index.html
+#   republish  - unpublish + resnapshot + publish, for a full rebuild
+- name: Apt repository publisher
+  hosts: localhost
+  vars_files:
+    - example-repo.yml
+  roles:
+    - role: repo
+      vars:
+        repo_action: publish

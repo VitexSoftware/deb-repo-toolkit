@@ -1,0 +1,26 @@
+---
+- name: "Set prepare {{ distro_family + ' ' + distro_release + ' ' + distro_repositories }}"
+  ansible.builtin.set_fact:
+    repo_name: "{{ distro_release }}-{{ distro_repositories }}-{{ distro_endpoint }}"
+
+- name: "Assembly Repo Create command for {{ distro_family + ' ' + distro_release + ' ' + distro_repositories }}"
+  ansible.builtin.set_fact:
+    repo_create_params: "-architectures={{ repo_architectures | join(',') }} -comment='{{ distro_family }} {{ distro_release }} {{ distro_repositories }} packages' -distribution='{{ distro_release }}' '{{ repo_name }}'"
+
+- name: Perform Create Repo
+  ansible.builtin.command: "aptly repo create {{ repo_create_params }}"
+  when: "repo_name not in repos_we_got"
+  become_user: "{{ repo_user }}"
+  environment:
+    HOME: "/var/lib/{{ repo_user }}"
+
+- name: Add Initial package into repo
+  ansible.builtin.command:
+    cmd: "aptly repo add {{ repo_name }} /tmp/{{ repo_seed_deb }}"
+  register: added
+  changed_when: "'added' in added.stdout"
+  failed_when: false
+  when: 'distro_repositories == "main" and repo_seed_deb is defined'
+  become_user: "{{ repo_user }}"
+  environment:
+    HOME: "/var/lib/{{ repo_user }}"

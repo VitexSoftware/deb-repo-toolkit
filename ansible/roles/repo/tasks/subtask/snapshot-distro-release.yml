@@ -1,0 +1,73 @@
+---
+- name: What releases ?
+  ansible.builtin.debug:
+    var: distro_releases
+
+- name: "What is my Distro release for snapshot ?"
+  ansible.builtin.set_fact:
+    distro_release: "{{ lookup('dict', distro_releases).key }}"
+
+- name: Release
+  ansible.builtin.debug:
+    var: distro_release
+
+- name: Main is default component
+  ansible.builtin.set_fact:
+    components: "{{ ['main'] }}"
+
+- name: Is there any components
+  ansible.builtin.set_fact:
+    components: "{{ ['main'] + lookup('dict', distro_releases).value }}"
+  when: "lookup('dict', distro_releases).value is not none and (lookup('dict', distro_releases).value | length) > 0"
+
+- name: "Show components for {{ distro_family }}"
+  ansible.builtin.debug:
+    var: components
+
+- name: "Set prepare {{ distro_family + ' ' + distro_release }}"
+  ansible.builtin.set_fact:
+    repo_name: "{{ distro_family }}-{{ distro_release }}"
+
+- name: "Create Repo Snapshots for {{ repo_name + ' ' + today + ' ' + distro_endpoint }}"
+  ansible.builtin.command: "aptly snapshot create {{ distro_release }}-{{ item }}-{{ distro_endpoint }}_{{ today }} from repo {{ distro_release }}-{{ item }}-{{ distro_endpoint }}"
+  with_items: "{{ components }}"
+  become: true
+  become_user: "{{ repo_user }}"
+  environment:
+    HOME: "/var/lib/{{ repo_user }}"
+  register: created
+  changed_when: '"successfully created." in created.stdout'
+  failed_when: false
+  when: " distro_release + '-' + item + '-' + distro_endpoint + '_' + today not in snapshots_today and distro_release + '-' + item + '-' + distro_endpoint in repos_we_got"
+
+- name: Ensure snapshot metadata directory exists
+  ansible.builtin.file:
+    path: "{{ repo_home }}/.snapshot-metadata"
+    state: directory
+    mode: "0755"
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+  become: true
+  become_user: root
+
+
+- name: Save package list for each created snapshot
+  ansible.builtin.shell:
+    cmd: |
+      snapshot_name="{{ distro_release }}-{{ item }}-{{ distro_endpoint }}_{{ today }}"
+      output_file="{{ repo_home }}/.snapshot-metadata/${snapshot_name}.json"
+
+      # Get package list and save as JSON array
+      aptly snapshot show -with-packages "$snapshot_name" 2>/dev/null | \
+        grep -E '^  [a-z0-9].*_' | \
+        sed 's/^  //' | \
+        sed 's/_\(amd64\|i386\|arm64\|armel\|armhf\|mips\|mipsel\|all\)$//' | \
+        jq -R -s 'split("\n") | map(select(length > 0)) | map(split("_") | {name: .[0], version: .[1]})' > "$output_file"
+    executable: /bin/bash
+  with_items: "{{ components }}"
+  become_user: "{{ repo_user }}"
+  environment:
+    HOME: "/var/lib/{{ repo_user }}"
+  changed_when: false
+  failed_when: false
+  when: "distro_release + '-' + item + '-' + distro_endpoint in repos_we_got"

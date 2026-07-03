@@ -1,0 +1,10 @@
+---
+- name: "What is my Distro family ?"
+  ansible.builtin.set_fact:
+    distro_family: "{{ lookup('dict', distro_families).key }}"
+
+- name: "Publish Distribution releases for {{ distro_family + ':' + distro_endpoint }}"
+  ansible.builtin.include_tasks: "subtask/publish-distro-release.yml"
+  loop: "{{ lookup('dict', distro_families).value }}"
+  loop_control:
+    loop_var: distro_releases

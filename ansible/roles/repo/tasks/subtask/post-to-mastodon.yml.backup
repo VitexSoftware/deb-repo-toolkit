@@ -1,0 +1,195 @@
+---
+- name: Check if toot is available
+  ansible.builtin.command: which toot
+  register: toot_check
+  failed_when: false
+  changed_when: false
+
+- name: Find today's snapshot metadata files
+  ansible.builtin.find:
+    paths: "{{ repo_home }}/.snapshot-metadata"
+    patterns: "*_{{ today }}.json"
+    file_type: file
+  register: today_metadata_files
+  become_user: "{{ repo_user }}"
+  when: toot_check.rc == 0
+
+- name: Find yesterday's snapshot metadata files
+  ansible.builtin.find:
+    paths: "{{ repo_home }}/.snapshot-metadata"
+    patterns: "*_{{ yesterday }}.json"
+    file_type: file
+  register: yesterday_metadata_files
+  become_user: "{{ repo_user }}"
+  vars:
+    yesterday: "{{ lookup('pipe', 'date -d yesterday +%Y-%m-%d') }}"
+  when: toot_check.rc == 0 and today_metadata_files.matched > 0
+
+- name: Compare package lists to find new/updated packages
+  ansible.builtin.shell:
+    cmd: |
+      today_files=({{ today_metadata_files.files | map(attribute='path') | map('quote') | join(' ') }})
+      yesterday_files=({{ (yesterday_metadata_files.files | default([])) | map(attribute='path') | map('quote') | join(' ') }})
+      
+      # Merge all today's packages into one JSON
+      today_packages=$(jq -s 'add | unique_by(.name) | sort_by(.name)' "${today_files[@]}" 2>/dev/null || echo '[]')
+      
+      if [ ${#yesterday_files[@]} -gt 0 ]; then
+        # Merge all yesterday's packages
+        yesterday_packages=$(jq -s 'add | unique_by(.name) | sort_by(.name)' "${yesterday_files[@]}" 2>/dev/null || echo '[]')
+        
+        # Find new or updated packages (different version)
+        jq -n -r --argjson today "$today_packages" --argjson yesterday "$yesterday_packages" '
+          ($today | map({(.name): .version}) | add) as $t_map |
+          ($yesterday | map({(.name): .version}) | add) as $y_map |
+          $today | map(select(
+            ($y_map[.name] // "") != .version
+          )) | .[] | "\(.name) \(.version)"' | head -60
+      else
+        # No yesterday data, show all today's packages
+        echo "$today_packages" | jq -r '.[] | "\(.name) \(.version)"' | head -60
+      fi
+    executable: /bin/bash
+  register: package_changes
+  changed_when: false
+  failed_when: false
+  become_user: "{{ repo_user }}"
+  environment:
+    HOME: "/var/lib/{{ repo_user }}"
+  when: toot_check.rc == 0 and today_metadata_files.matched > 0
+
+- name: Set new_packages list
+  ansible.builtin.set_fact:
+    new_packages: "{{ package_changes.stdout_lines | default([]) }}"
+  when: toot_check.rc == 0 and package_changes.stdout_lines is defined
+
+- name: Find package icons from DEP-11 metadata
+  ansible.builtin.shell:
+    cmd: |
+      # Search for package icons in DEP-11 metadata
+      dep11_dir="{{ repo_home }}/asgen/export/data"
+      media_dir="{{ repo_home }}/asgen/export/media"
+      
+      if [ ! -d "$dep11_dir" ]; then
+        exit 0
+      fi
+      
+      # Extract package names (without version)
+      packages=({{ new_packages | map('regex_replace', '^([^ ]+) .*$', '\1') | join(' ') }})
+      
+      # Find icons for these packages (max 4)
+      found=0
+      for pkg in "${packages[@]}"; do
+        if [ $found -ge 4 ]; then
+          break
+        fi
+        
+        # Search in DEP-11 YAML files for this package
+        for yaml in $(find "$dep11_dir" -name "*.yml" -o -name "*.yml.gz"); do
+          if [[ "$yaml" == *.gz ]]; then
+            icon=$(zcat "$yaml" 2>/dev/null | grep -A50 "^- ID: $pkg$" | grep "  cached:" | head -1 | awk '{print $3}')
+          else
+            icon=$(grep -A50 "^- ID: $pkg$" "$yaml" 2>/dev/null | grep "  cached:" | head -1 | awk '{print $3}')
+          fi
+          
+          if [ -n "$icon" ]; then
+            icon_path="$media_dir/$icon"
+            if [ -f "$icon_path" ]; then
+              echo "$icon_path"
+              found=$((found + 1))
+              break
+            fi
+          fi
+        done
+      done
+    executable: /bin/bash
+  register: package_icons
+  changed_when: false
+  failed_when: false
+  become_user: "{{ repo_user }}"
+  environment:
+    HOME: "/var/lib/{{ repo_user }}"
+  when: toot_check.rc == 0 and new_packages is defined and new_packages | length > 0
+
+- name: Generate Mastodon post content with package details
+  ansible.builtin.set_fact:
+    mastodon_post: |
+      🎉 Repository updated: {{ repo_domain }}
+      
+      {% if new_packages | length > 0 %}
+      📦 New/Updated packages:
+      {% for pkg in new_packages[:50] %}
+      • {{ pkg }}
+      {% endfor %}
+      {% if new_packages | length > 50 %}
+      ... and {{ new_packages | length - 50 }} more
+      {% endif %}
+      {% else %}
+      📦 {{ distro_list | length }} distributions available
+      {% endif %}
+      
+      🔗 http://{{ repo_domain }}/
+      
+      #Debian #Ubuntu #Repository #OpenSource
+  when: toot_check.rc == 0 and distro_list is defined
+
+- name: Display toot content for CI/CD logs
+  ansible.builtin.debug:
+    msg: |
+      ========================================
+      MASTODON POST CONTENT:
+      ========================================
+      {{ mastodon_post }}
+      ========================================
+  when: toot_check.rc == 0 and mastodon_post is defined
+
+- name: Prepare toot command with media attachments
+  ansible.builtin.set_fact:
+    toot_media_args: >-
+      {{
+        (package_icons.stdout_lines | default([]))[:4] |
+        map('regex_replace', '^(.*)$', '-m \1') |
+        join(' ')
+      }}
+  when: toot_check.rc == 0 and package_icons.stdout_lines is defined and package_icons.stdout_lines | length > 0
+
+- name: Display media attachments for CI/CD logs
+  ansible.builtin.debug:
+    msg: "Media attachments: {{ package_icons.stdout_lines | default([]) | list }}"
+  when: toot_check.rc == 0 and package_icons.stdout_lines is defined and package_icons.stdout_lines | length > 0
+
+- name: Post to Mastodon with images
+  ansible.builtin.shell:
+    cmd: |
+      cat <<'TOOT_EOF' | toot post -v unlisted {{ toot_media_args | default('') }}
+      {{ mastodon_post }}
+      TOOT_EOF
+    executable: /bin/bash
+  register: toot_result
+  changed_when: toot_result.rc == 0
+  failed_when: false
+  become_user: "{{ repo_user }}"
+  when: toot_check.rc == 0 and mastodon_post is defined and toot_media_args is defined and toot_media_args | length > 0
+
+- name: Post to Mastodon without images
+  ansible.builtin.shell:
+    cmd: |
+      cat <<'TOOT_EOF' | toot post -v unlisted
+      {{ mastodon_post }}
+      TOOT_EOF
+    executable: /bin/bash
+  register: toot_result_no_media
+  changed_when: toot_result_no_media.rc == 0
+  failed_when: false
+  become_user: "{{ repo_user }}"
+  when: toot_check.rc == 0 and mastodon_post is defined and (toot_media_args is not defined or toot_media_args | length == 0) and toot_result is not defined
+
+- name: Display toot result
+  ansible.builtin.debug:
+    msg: |
+      ========================================
+      MASTODON POST RESULT:
+      ========================================
+      {{ (toot_result.stdout if toot_result.skipped is not defined else toot_result_no_media.stdout) if (toot_result.skipped is not defined or toot_result_no_media.skipped is not defined) else 'Skipped - toot not available or post failed' }}
+      ========================================
+  when: (toot_result is defined and toot_result.skipped is not defined) or (toot_result_no_media is defined and toot_result_no_media.skipped is not defined)

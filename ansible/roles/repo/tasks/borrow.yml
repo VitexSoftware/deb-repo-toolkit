@@ -1,0 +1,6 @@
+---
+- name: Borrow Github packages
+  ansible.builtin.include_tasks: "subtask/borrowgithub.yml"
+  loop: "{{ packages }}"
+  loop_control:
+    loop_var: package

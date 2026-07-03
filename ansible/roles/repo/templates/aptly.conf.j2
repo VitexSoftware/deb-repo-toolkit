@@ -1,0 +1,30 @@
+{
+  "rootDir": "{{ repo_home }}",
+  "downloadConcurrency": 4,
+  "downloadSpeedLimit": 0,
+  "architectures": {{ repo_architectures | to_json }},
+  "dependencyFollowSuggests": false,
+  "dependencyFollowRecommends": false,
+  "dependencyFollowAllVariants": false,
+  "dependencyFollowSource": false,
+  "dependencyVerboseResolve": false,
+  "gpgDisableSign": false,
+  "gpgDisableVerify": false,
+  "gpgProvider": "gpg",
+  "downloadSourcePackages": false,
+  "skipLegacyPool": false,
+  "ppaDistributorID": "{{ repo_keyword }}",
+  "ppaCodename": "",
+  "skipContentsPublishing": false,
+  "skipBz2Publishing": false,
+  "FileSystemPublishEndpoints": {
+    "{{ publish_endpoint }}": {
+      "rootDir": "{{ repo_public }}",
+      "linkMethod": "copy",
+      "verifyMethod": "md5"
+    }
+  },
+  "S3PublishEndpoints": {},
+  "SwiftPublishEndpoints": {},
+  "AzurePublishEndpoints": {}
+}

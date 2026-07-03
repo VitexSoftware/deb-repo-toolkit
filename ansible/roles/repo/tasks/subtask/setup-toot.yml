@@ -1,0 +1,29 @@
+---
+- name: Install toot Mastodon CLI
+  ansible.builtin.package:
+    name: toot
+    state: present
+  become: true
+  become_user: root
+
+- name: Ensure toot config directory exists for {{ repo_user }}
+  ansible.builtin.file:
+    path: "/var/lib/{{ repo_user }}/.config/toot"
+    state: directory
+    mode: "0700"
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+  become: true
+  become_user: root
+  when: mastodon_access_token is defined and mastodon_access_token | length > 0
+
+- name: Deploy toot config for {{ repo_user }}
+  ansible.builtin.template:
+    src: toot-config.json.j2
+    dest: "/var/lib/{{ repo_user }}/.config/toot/config.json"
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+    mode: "0600"
+  become: true
+  become_user: root
+  when: mastodon_access_token is defined and mastodon_access_token | length > 0

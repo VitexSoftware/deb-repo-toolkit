@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly Repository Synchronization Timer
+Requires=sync-repo-to-website.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+Persistent=true
+Unit=sync-repo-to-website.service
+
+[Install]
+WantedBy=timers.target

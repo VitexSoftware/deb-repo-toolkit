@@ -1,0 +1,21 @@
+---
+- name: Check already Snapshoted
+  ansible.builtin.command: "aptly snapshot -raw list"
+  register: snapshoted_raw
+  changed_when: snapshoted_raw.rc != 0
+  ignore_errors: true
+
+- name: Use snapshoted list as fact
+  ansible.builtin.set_fact:
+    snapshoted: "{{ snapshoted_raw.stdout_lines if snapshoted_raw.stdout_lines is iterable else [] }}"
+
+- name: Snapshoted yet
+  ansible.builtin.debug:
+    var: snapshoted
+
+- name: Drop snapshoted
+  ansible.builtin.include_tasks: 'subtask/snapshot-drop.yml'
+  register: dropped
+  loop: "{{ snapshoted }}"
+  loop_control:
+    loop_var: snapshot

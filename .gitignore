@@ -1,0 +1,6 @@
+*.retry
+.vault_pass
+*.deb
+*.log
+__pycache__/
+*.pyc

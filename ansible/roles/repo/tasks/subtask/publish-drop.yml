@@ -1,0 +1,10 @@
+---
+- name: 'PublishString {{ publish }}'
+  ansible.builtin.set_fact:
+    publish_string: "Publish `{{ publish }}` has been dropped."
+
+- name: 'Drop published {{ publish }}'
+  ansible.builtin.command:
+    cmd: "aptly publish drop {{ publish }}"
+  changed_when: 'publish_string in dropped.stdout'
+  register: dropped

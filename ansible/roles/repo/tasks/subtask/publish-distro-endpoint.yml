@@ -1,0 +1,10 @@
+---
+- name: "What is my Current Endpoint ?"
+  ansible.builtin.set_fact:
+    distro_endpoint: "{{ lookup('dict', distro_endpoints).key }}"
+
+- name: "Create Distribution families for {{ distro_endpoint }}"
+  ansible.builtin.include_tasks: 'subtask/publish-distro-family.yml'
+  loop: "{{ lookup('dict', distro_endpoints).value }}"
+  loop_control:
+    loop_var: distro_families

@@ -1,0 +1,105 @@
+---
+- name: Ensure appstream-generator is installed
+  ansible.builtin.package:
+    name:
+      - appstream-generator
+      - appstream
+      - gir1.2-appstream-1.0
+      - python3-yaml
+    state: present
+  become: true
+  become_user: root
+
+- name: Ensure AppStream config directory exists
+  ansible.builtin.file:
+    path: "{{ repo_home }}/asgen"
+    state: directory
+    mode: "0755"
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+  become: true
+  become_user: root
+
+- name: Ensure AppStream export directory exists
+  ansible.builtin.file:
+    path: "{{ repo_home }}/asgen/export"
+    state: directory
+    mode: "0755"
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+  become: true
+  become_user: root
+
+- name: Ensure AppStream cache directory exists
+  ansible.builtin.file:
+    path: "{{ repo_home }}/asgen/cache"
+    state: directory
+    mode: "0755"
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+  become: true
+  become_user: root
+
+- name: Ensure DEP-11 output directories exist
+  ansible.builtin.file:
+    path: "{{ repo_public }}/dep11/{{ item }}"
+    state: directory
+    mode: "0755"
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+  loop:
+    - media
+    - html
+  become: true
+  become_user: root
+
+- name: Generate AppStream configuration
+  ansible.builtin.template:
+    src: asgen-config.json.j2
+    dest: "{{ repo_home }}/asgen/asgen-config.json"
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+    mode: "0644"
+  become: true
+  become_user: root
+
+- name: Get list of published distributions
+  ansible.builtin.set_fact:
+    distro_list: >-
+      {{ aptly_repo_list | map(attribute='DefaultDistribution') | list | unique | sort }}
+  when: aptly_repo_list is defined
+
+- name: Clean up old AppStream data
+  ansible.builtin.command:
+    cmd: "appstream-generator cleanup --config {{ repo_home }}/asgen/asgen-config.json"
+  register: asgen_cleanup
+  changed_when: asgen_cleanup.rc == 0
+  failed_when: false
+  become: true
+  become_user: "{{ repo_user }}"
+  environment:
+    TMPDIR: "/tmp"
+
+- name: Generate DEP-11 metadata for all distributions
+  ansible.builtin.shell: |
+    set -o pipefail
+    cd {{ repo_home }}
+    for dist in {{ distro_list | join(' ') }}; do
+      echo "Processing DEP-11 metadata for ${dist}..."
+      appstream-generator run "${dist}" --config asgen/asgen-config.json 2>&1 | grep -E '(INFO|ERROR|WARNING)' || true
+    done
+  register: asgen_process
+  changed_when: asgen_process.rc == 0
+  failed_when: false
+  when: distro_list is defined and distro_list | length > 0
+  become: true
+  become_user: "{{ repo_user }}"
+  environment:
+    TMPDIR: "/tmp"
+  args:
+    executable: /bin/bash
+
+- name: Display DEP-11 generation results
+  ansible.builtin.debug:
+    msg: "DEP-11 metadata generated for distributions: {{ distro_list | join(', ') }}"
+  when: distro_list is defined

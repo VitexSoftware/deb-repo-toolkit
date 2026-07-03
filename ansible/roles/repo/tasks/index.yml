@@ -1,0 +1,25 @@
+---
+- name: Repos already present
+  ansible.builtin.command: aptly repo list -raw
+  register: repo_present_raw
+  changed_when: repo_present_raw
+
+- name: Repos we got
+  ansible.builtin.set_fact:
+    repos_we_got: "{{ repo_present_raw.stdout_lines }}"
+    allpackages: "{{ [] }}"
+
+- name: Make Index for Each Distro
+  ansible.builtin.include_tasks: "subtask/index-distro.yml"
+  loop: "{{ repos_we_got }}"
+  loop_control:
+    loop_var: repo
+
+- name: Show Result Array
+  ansible.builtin.debug:
+    var: allpackages
+# - name: Update Repo graph
+#   ansible.builtin.command:
+#     cmd: "aptly graph -format=svg -output={{ repo_public }}/repograph.svg"
+#   register: ret
+#   changed_when: "'Output saved to ' in ret.stdout"

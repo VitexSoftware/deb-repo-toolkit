@@ -1,0 +1,50 @@
+{
+  "ProjectName": "{{ repo_keyword | capitalize }} Repository",
+  "ArchiveRoot": "{{ repo_home }}/public/{{ publish_endpoint }}",
+  "MediaBaseUrl": "https://{{ repo_domain }}/media",
+  "HtmlBaseUrl": "https://{{ repo_domain }}/dep11/html",
+  "Backend": "debian",
+  "Features": {
+    "validateMetainfo": true,
+    "processDesktop": true,
+    "processScreenshots": true,
+    "processTranslations": true,
+    "processFonts": true,
+    "validateDesktop": true,
+    "noDownloads": false,
+    "createHtmlIndex": true,
+    "immutableSuites": false
+  },
+  "Oldsuites": [],
+  "Suites": {
+{% set suite_list = [] %}
+{% for endpoint in repos %}
+{% for ep_name, families in endpoint.items() %}
+{% if ep_name == publish_endpoint %}
+{% for family in families %}
+{% for family_name, suites in family.items() %}
+{% for suite_obj in suites %}
+{% for suite_name, comps in suite_obj.items() %}
+{% set _ = suite_list.append((suite_name, comps)) %}
+{% endfor %}
+{% endfor %}
+{% endfor %}
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% endfor %}
+{% for suite_name, comps in suite_list %}
+    "{{ suite_name }}": {
+      "dataPriority": 1,
+      "baseSuite": "{{ suite_name }}",
+      "useIconTheme": "breeze",
+      "sections": ["main"{% if comps|length > 0 %}{% for comp in comps %}, "{{ comp }}"{% endfor %}{% endif %}],
+      "architectures": {{ repo_architectures | to_json }},
+      "dataimportDirs": []
+    }{% if not loop.last %},{% endif %}
+{% endfor %}
+  },
+  "CAInfo": "",
+  "AllowedCustomKeys": [],
+  "MetadataType": "YAML"
+}

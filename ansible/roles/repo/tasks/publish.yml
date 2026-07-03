@@ -1,0 +1,815 @@
+---
+- name: Ensure gnupg and aptly are installed
+  ansible.builtin.package:
+    name:
+      - gnupg
+      - aptly
+    state: present
+  become: true
+  become_user: root
+
+- name: Ensure base directories exist for {{ repo_user }}
+  ansible.builtin.file:
+    path: "/var/lib/{{ repo_user }}"
+    state: directory
+    mode: "0750"
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+  become: true
+  become_user: root
+
+- name: Ensure GnuPG home exists for {{ repo_user }}
+  ansible.builtin.file:
+    path: "/var/lib/{{ repo_user }}/.gnupg"
+    state: directory
+    mode: "0700"
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+  become: true
+  become_user: root
+
+- name: Derive publish endpoint name from repos list
+  ansible.builtin.set_fact:
+    publish_endpoint: "{{ (repos | first) | dict2items | first | json_query('key') }}"
+
+- name: Ensure publish parent dir exists
+  ansible.builtin.file:
+    path: "{{ repo_public | dirname }}"
+    state: directory
+    mode: "0755"
+  become: true
+  become_user: root
+
+- name: Ensure publish rootDir exists
+  ansible.builtin.file:
+    path: "{{ repo_public }}"
+    state: directory
+    mode: "0755"
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+  become: true
+  become_user: root
+
+- name: Configure aptly with proper settings
+  ansible.builtin.template:
+    src: aptly.conf.j2
+    dest: "/etc/aptly.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  become_user: root
+
+- name: Create symlink from user aptly config to system config
+  ansible.builtin.file:
+    src: "/etc/aptly.conf"
+    dest: "/var/lib/{{ repo_user }}/.aptly.conf"
+    state: link
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+  become: true
+  become_user: root
+
+# Use /etc/aptly.conf instead
+# - name: Configure aptly FileSystem publish endpoint for {{ publish_endpoint }}
+#   ansible.builtin.copy:
+#     dest: "/var/lib/{{ repo_user }}/.aptly.conf"
+#     owner: "{{ repo_user }}"
+#     group: "{{ repo_user }}"
+#     mode: "0600"
+#     content: |
+#       {
+#         "FileSystemPublishEndpoints": {
+#           "{{ publish_endpoint }}": {
+#             "rootDir": "{{ repo_public }}",
+#             "linkMethod": "copy"
+#           }
+#         }
+#       }
+#   become: true
+
+- name: Determine base URL for sources snippets
+  ansible.builtin.set_fact:
+    base_url: "{{ endpoint_base_urls[publish_endpoint] | default('http://' + repo_domain) }}"
+
+- name: Export public GPG key (armored)
+  ansible.builtin.command: "gpg --homedir /var/lib/{{ repo_user }}/.gnupg --export --armor"
+  register: repo_pubkey
+  changed_when: false
+  become_user: "{{ repo_user }}"
+
+- name: Write KEY.asc into publish root
+  ansible.builtin.copy:
+    dest: "{{ repo_public }}/KEY.asc"
+    content: "{{ repo_pubkey.stdout }}\n"
+
+- name: Export public GPG key (keyring)
+  ansible.builtin.shell:
+    cmd: "gpg --homedir /var/lib/{{ repo_user }}/.gnupg --export > {{ repo_public }}/KEY.gpg"
+  args:
+    executable: /bin/bash
+    creates: "{{ repo_public }}/KEY.gpg"
+  become_user: "{{ repo_user }}"
+
+- name: Get Aptly repositories list (JSON)
+  ansible.builtin.command: aptly repo -json list
+  register: aptly_repo_list_json
+  changed_when: false
+  become_user: "{{ repo_user }}"
+
+- name: Set aptly_repo_list fact
+  ansible.builtin.set_fact:
+    aptly_repo_list: "{{ aptly_repo_list_json.stdout | from_json }}"
+  when: aptly_repo_list_json.stdout is defined
+
+- name: Set generation metadata facts
+  ansible.builtin.set_fact:
+    generated_at: "{{ (ansible_date_time.iso8601 if (ansible_date_time is defined and 'iso8601' in ansible_date_time) else lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')) }}"
+    semaphore_task_id: "{{ lookup('env', 'SEMAPHORE_TASK_ID') | default('', true) }}"
+
+
+# - name: Generate sources snippets (plain text)
+#   ansible.builtin.copy:
+#     dest: "{{ repo_public }}/sources.list.txt"
+#     owner: "{{ repo_user }}"
+#     group: "{{ repo_user }}"
+#     mode: "0644"
+#     content: |
+#       # apt sources for {{ publish_endpoint }}
+#       # Key: {{ base_url }}/KEY.gpg
+#       # Install: sudo curl -fsSL {{ base_url }}/KEY.gpg -o /usr/share/keyrings/{{ publish_endpoint }}-archive-keyring.gpg
+#       {% for endpoint in repos %}
+#         {% for ep_name, families in endpoint.items() %}
+#           {% if ep_name == publish_endpoint %}
+#             {% for family in families %}
+#               {% for family_name, suites in family.items() %}
+#                 # {{ family_name|capitalize }}
+#                 {% for suite_obj in suites %}
+#                   {% for suite_name, comps in suite_obj.items() %}
+#                     deb [signed-by=/usr/share/keyrings/{{ publish_endpoint }}-archive-keyring.gpg] {{ base_url }} {{ suite_name }} main{% if comps|length > 0 %} {{ comps|join(' ') }}{% endif %}
+#                   {% endfor %}
+#                 {% endfor %}
+#               {% endfor %}
+#             {% endfor %}
+#           {% endif %}
+#         {% endfor %}
+#       {% endfor %}
+
+- name: Ensure passphrase file exists
+  ansible.builtin.copy:
+    dest: "{{ passphrasefile }}"
+    content: ""
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+    mode: "0600"
+    force: false
+  become: true
+  become_user: root
+
+- name: Check if secret key exists
+  ansible.builtin.command: "gpg --homedir /var/lib/{{ repo_user }}/.gnupg --list-secret-keys --with-colons"
+  register: gpg_keys
+  changed_when: false
+  failed_when: false
+
+- name: Generate GPG key for {{ repo_user }} when missing
+  when: "'sec:' not in gpg_keys.stdout"
+  block:
+    - name: Create GPG batch file
+      ansible.builtin.copy:
+        dest: "/var/lib/{{ repo_user }}/.gnupg/gpg-batch"
+        owner: "{{ repo_user }}"
+        group: "{{ repo_user }}"
+        mode: "0600"
+        content: |
+          %no-protection
+          Key-Type: RSA
+          Key-Length: 4096
+          Name-Real: "{{ repo_name }} ({{ repo_user }})"
+          Name-Email: {{ repo_admin_email }}
+          Expire-Date: 0
+          %commit
+      become: true
+      become_user: root
+    - name: Generate key
+      ansible.builtin.command: "gpg --homedir /var/lib/{{ repo_user }}/.gnupg --batch --generate-key /var/lib/{{ repo_user }}/.gnupg/gpg-batch"
+      become: true
+      become_user: root
+      changed_when: true
+
+- name: Determine repo key fingerprint
+  ansible.builtin.command: "gpg --homedir /var/lib/{{ repo_user }}/.gnupg --list-secret-keys --with-colons"
+  register: gpg_list
+  changed_when: false
+
+- name: Set repo_key fact
+  ansible.builtin.set_fact:
+    repo_key: "{{ (gpg_list.stdout_lines | select('match', '^fpr:') | list | first | split(':'))[9] }}"
+
+- name: Refresh GPG key self-signature to SHA256 (fixes sqv rejection of SHA1 binding on Debian trixie+)
+  ansible.builtin.command: >
+    gpg --homedir /var/lib/{{ repo_user }}/.gnupg
+    --passphrase-file {{ passphrasefile }}
+    --pinentry-mode loopback
+    --cert-digest-algo SHA256
+    --quick-update-pref {{ repo_key }}
+  become: true
+  become_user: "{{ repo_user }}"
+  changed_when: false
+  failed_when: false
+
+- name: Check already Published
+  ansible.builtin.shell:
+    cmd: "aptly publish -raw list | awk ' { t = $1; $1 = $2; $2 = t; print; } '"
+  register: published_raw
+  changed_when: published_raw.rc != 0
+  ignore_errors: true
+
+- name: Use published list as fact
+  ansible.builtin.set_fact:
+    published: "{{ published_raw.stdout_lines if published_raw.stdout_lines is iterable else [] }}"
+
+- name: Published yet
+  ansible.builtin.debug:
+    var: published
+
+- name: Repos already present
+  ansible.builtin.command: "aptly repo list -raw"
+  register: repos_present_raw
+  changed_when: false
+
+- name: Check todays Snapshots
+  ansible.builtin.shell:
+    cmd: "aptly snapshot -raw list | grep  {{ today }}"
+  register: snapshots_raw
+  changed_when: snapshots_raw.rc != 0
+  ignore_errors: true
+
+- name: Repos we got
+  ansible.builtin.set_fact:
+    repos_we_got: "{{ repos_present_raw.stdout_lines }}"
+    snapshots_today: "{{ snapshots_raw.stdout_lines }}"
+
+- name: Remove old dists from aptly endpoint directory
+  ansible.builtin.file:
+    path: "{{ repo_home }}/public/{{ publish_endpoint }}/dists"
+    state: absent
+  become: true
+  become_user: root
+  when: publish_endpoint is defined
+  ignore_errors: true
+
+- name: Remove old pool from aptly endpoint directory
+  ansible.builtin.file:
+    path: "{{ repo_home }}/public/{{ publish_endpoint }}/pool"
+    state: absent
+  become: true
+  become_user: root
+  when: publish_endpoint is defined
+  ignore_errors: true
+
+- name: Capture pre-publish package baseline for Mastodon announcement diff
+  ansible.builtin.shell:
+    cmd: |
+      metadata_dir="{{ repo_home }}/.snapshot-metadata"
+      mkdir -p "$metadata_dir"
+      today=$(date +%Y-%m-%d)
+      # Archive only files from previous runs (not today's) as the baseline.
+      # Today's files were just created by the snapshot step and must remain
+      # so post-to-mastodon can diff them against *_previous.json.
+      find "$metadata_dir" -maxdepth 1 -name "*.json" \
+        -not -name "*_previous.json" \
+        -not -name "*_${today}.json" \
+        -type f 2>/dev/null |
+      while IFS= read -r f; do
+        newfile="${f%_*.json}_previous.json"
+        mv -f "$f" "$newfile"
+        echo "Baseline: $(basename $f)"
+      done
+    executable: /bin/bash
+  become_user: "{{ repo_user }}"
+  changed_when: false
+  failed_when: false
+
+- name: Publish todays Snapshots
+  ansible.builtin.include_tasks: "subtask/publish-distro-endpoint.yml"
+  loop: "{{ repos }}"
+  loop_control:
+    loop_var: distro_endpoints
+
+# - name: Update Repo graph
+#   command:
+#     cmd: "aptly graph -format=svg -output={{ repo_public }}/repograph.svg"
+#   register: ret
+#   changed_when: "'Output saved to ' in ret.stdout"
+#   become_user: '{{ repo_user }}'
+
+- name: Set fact for distro list (for DEP-11)
+  ansible.builtin.set_fact:
+    distro_list: >-
+      {{ aptly_repo_list | map(attribute='DefaultDistribution') | list | unique | sort
+         | reject('in', hidden_distros | default([])) | list }}
+
+# Build distribution-component mapping early so the DEP-11 copy loop is dynamic
+- name: Build distribution-component mapping
+  ansible.builtin.set_fact:
+    distro_components: >-
+      {%- set result = {} -%}
+      {%- for endpoint in repos -%}
+        {%- for ep_name, families in endpoint.items() -%}
+          {%- if ep_name == publish_endpoint -%}
+            {%- for family in families -%}
+              {%- for family_name, suites in family.items() -%}
+                {%- for suite_obj in suites -%}
+                  {%- for suite_name, comps in suite_obj.items() -%}
+                    {%- set components = ['main'] -%}
+                    {%- if comps is iterable and comps is not string -%}
+                      {%- set _ = components.extend(comps) -%}
+                    {%- endif -%}
+                    {%- set _ = result.update({suite_name: components}) -%}
+                  {%- endfor -%}
+                {%- endfor -%}
+              {%- endfor -%}
+            {%- endfor -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ result }}
+
+- name: Generate DEP-11 metadata
+  ansible.builtin.include_tasks: "subtask/generate-dep11.yml"
+
+- name: Deploy DEP-11 description extractor script
+  ansible.builtin.copy:
+    src: extract-dep11-descriptions.py
+    dest: "{{ repo_home }}/extract-dep11-descriptions.py"
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+    mode: "0755"
+  become: true
+  become_user: root
+
+# Reuses the DEP-11 metadata already generated for /imgdeb icons — no extra
+# per-package aptly queries needed to populate the package browser popup.
+- name: Extract package descriptions from DEP-11 metadata
+  ansible.builtin.command:
+    cmd: "python3 {{ repo_home }}/extract-dep11-descriptions.py {{ repo_home }}/asgen/export/data"
+  register: dep11_descriptions_result
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: "{{ repo_user }}"
+
+- name: Set fact for package descriptions
+  ansible.builtin.set_fact:
+    package_descriptions: >-
+      {{ (dep11_descriptions_result.stdout | from_json)
+         if (dep11_descriptions_result.rc == 0 and dep11_descriptions_result.stdout | trim | length > 0)
+         else {} }}
+
+- name: Copy DEP-11 metadata to published repository
+  block:
+    - name: Copy DEP-11 data for each distribution/component
+      ansible.builtin.shell: |
+        for dist in {{ distro_list | join(' ') }}; do
+          for comp in {{ distro_components.values() | flatten | unique | join(' ') }}; do
+            src_dir="{{ repo_home }}/asgen/export/data/${dist}/${comp}"
+            dest_dir="{{ repo_home }}/public/{{ publish_endpoint }}/dists/${dist}/${comp}/dep11"
+            if [ -d "${src_dir}" ]; then
+              echo "Copying DEP-11 metadata: ${dist}/${comp}"
+              mkdir -p "${dest_dir}"
+              cp -r "${src_dir}/"* "${dest_dir}/"
+            else
+              echo "No DEP-11 metadata for ${dist}/${comp}"
+            fi
+          done
+        done
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: "{{ repo_user }}"
+
+    - name: Copy DEP-11 media (icons, screenshots)
+      ansible.builtin.shell: |
+        media_src="{{ repo_home }}/asgen/export/media"
+        media_dest="{{ repo_home }}/public/{{ publish_endpoint }}"
+        if [ -d "${media_src}" ]; then
+          echo "Copying DEP-11 media files"
+          rsync -av --delete "${media_src}/" "${media_dest}/media/"
+        fi
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: "{{ repo_user }}"
+
+    - name: Ensure flat imgdeb icon directory exists at web root
+      ansible.builtin.file:
+        path: "{{ repo_public }}/imgdeb"
+        state: directory
+        mode: "0755"
+        owner: "{{ repo_user }}"
+        group: "www-data"
+      become: true
+      become_user: root
+
+    - name: Flatten AppStream icons into imgdeb for /imgdeb/<pkgname>.png serving
+      ansible.builtin.shell: |
+        MEDIA_DIR="{{ repo_home }}/asgen/export/media"
+        IMGDEB_DIR="{{ repo_public }}/imgdeb"
+        # Remove stale symlinks with broken double-.png.png names from old regex
+        find "$IMGDEB_DIR" -name '*.png.png' -type l -delete 2>/dev/null || true
+        find "$MEDIA_DIR" -path "*/icons/64x64/*.png" 2>/dev/null | while IFS= read -r icon; do
+          pkgname=$(basename "$icon" | sed 's/_[a-f0-9]\{8,\}\.png$//;s/_.*//')
+          [ -n "$pkgname" ] && ln -sf "$icon" "${IMGDEB_DIR}/${pkgname}.png"
+        done
+        echo "imgdeb: $(ls -1 "$IMGDEB_DIR" 2>/dev/null | wc -l) icons"
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: "{{ repo_user }}"
+      register: imgdeb_result
+      changed_when: true
+      failed_when: false
+
+    - name: Show imgdeb icon count
+      ansible.builtin.debug:
+        var: imgdeb_result.stdout
+
+- name: Re-sign InRelease files to include dep11 hashes
+  ansible.builtin.include_tasks: "subtask/resign-with-dep11.yml"
+
+- name: Published
+  ansible.builtin.command:
+    cmd: "aptly publish -raw list"
+  register: published_raw
+  changed_when: published_raw.rc != 0
+
+- name: "All Published yet"
+  ansible.builtin.debug:
+    var: published_raw
+
+# Build flat list of distro-component pairs to query (all components, not just main)
+- name: Build distro-component query list
+  ansible.builtin.set_fact:
+    distro_component_pairs: >-
+      {%- set pairs = [] -%}
+      {%- for distro, components in distro_components.items() -%}
+        {%- for comp in components -%}
+          {%- set _ = pairs.append({"distro": distro, "component": comp}) -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ pairs }}
+
+# Get package lists for all distro-component combinations
+- name: Get package list for each distro-component (JSON)
+  ansible.builtin.command: "aptly repo show -with-packages -json {{ item.distro }}-{{ item.component }}-{{ publish_endpoint }}"
+  register: repo_packages_json
+  loop: "{{ distro_component_pairs }}"
+  changed_when: false
+  failed_when: false
+
+# Initialise empty dict so the accumulation loop has a base value
+- name: Initialize package_links
+  ansible.builtin.set_fact:
+    package_links: {}
+
+# Accumulate package entries (name + component) per distro
+- name: Set fact for package links with component info
+  ansible.builtin.set_fact:
+    package_links: >-
+      {%- set distro = item.item.distro -%}
+      {%- set comp = item.item.component -%}
+      {%- set pkgs = (item.stdout | from_json).Packages | default([]) -%}
+      {%- set tagged = [] -%}
+      {%- for pkg in pkgs -%}
+        {%- set _ = tagged.append({"name": pkg, "component": comp, "description": package_descriptions.get(pkg.split('_')[0], '')}) -%}
+      {%- endfor -%}
+      {{ package_links | combine({distro: package_links.get(distro, []) + tagged}) }}
+  loop: "{{ repo_packages_json.results }}"
+  when: item.rc is defined and item.rc == 0 and item.stdout is defined and item.stdout | length > 0
+
+- name: Remove hidden distros from package_links
+  ansible.builtin.set_fact:
+    package_links: >-
+      {{ package_links | dict2items
+         | rejectattr('key', 'in', hidden_distros | default([]))
+         | items2dict }}
+
+# Generate README.html with Bootstrap 5 multi-level tabs for distro organization
+- name: Generate Bootstrap 5 README.html
+  ansible.builtin.template:
+    src: README-bootstrap5.html.j2
+    dest: "{{ repo_public }}/README.html"
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+    mode: "0644"
+
+  # Generate INDEX.html with Bootstrap 5 (same as README.html)
+- name: Generate INDEX.html with Bootstrap 5 search functionality
+  ansible.builtin.template:
+    src: README-bootstrap5.html.j2
+    dest: "{{ repo_public }}/index.html"
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+    mode: "0644"
+
+- name: Deploy repo.css static stylesheet
+  ansible.builtin.copy:
+    src: repo.css
+    dest: "{{ repo_public }}/repo.css"
+    owner: "{{ repo_user }}"
+    group: "www-data"
+    mode: "0644"
+  become: true
+  become_user: root
+
+- name: Deploy repo.js static script
+  ansible.builtin.copy:
+    src: repo.js
+    dest: "{{ repo_public }}/repo.js"
+    owner: "{{ repo_user }}"
+    group: "www-data"
+    mode: "0644"
+  become: true
+  become_user: root
+
+- name: Deploy placeholder.svg for packages without an AppStream icon
+  ansible.builtin.copy:
+    src: placeholder.svg
+    dest: "{{ repo_public }}/placeholder.svg"
+    owner: "{{ repo_user }}"
+    group: "www-data"
+    mode: "0644"
+  become: true
+  become_user: root
+
+# - name: Ensure {{ repo_public }} is ready for apache www-data user
+#   ansible.builtin.file:
+#     path: "{{ repo_public }}"
+#     state: directory
+#     mode: "0775"
+#     owner: "{{ repo_user }}"
+#     group: "www-data"
+#   become: true
+#   become_user: root
+
+# /var/lib/multirepo/.aptly/public/multiflexi/dists
+# /var/lib/multirepo/public/multiflexi
+
+- name: Ensure web root directory exists
+  ansible.builtin.file:
+    path: "{{ repo_public }}"
+    state: directory
+    mode: "0755"
+    owner: "{{ repo_user }}"
+    group: "www-data"
+  become: true
+  become_user: root
+
+- name: Remove old dists if it's a directory (not a symlink)
+  ansible.builtin.file:
+    path: "{{ repo_public }}/dists"
+    state: absent
+  become: true
+  become_user: root
+  when: repo_public is defined and repo_public != (repo_home + '/public/' + publish_endpoint)
+  ignore_errors: true
+
+- name: Remove old pool if it's a directory (not a symlink)
+  ansible.builtin.file:
+    path: "{{ repo_public }}/pool"
+    state: absent
+  become: true
+  become_user: root
+  when: repo_public is defined and repo_public != (repo_home + '/public/' + publish_endpoint)
+  ignore_errors: true
+
+- name: Ensure dists symlink is on website server
+  ansible.builtin.file:
+    path: "{{ repo_public }}/dists"
+    state: link
+    src: "{{ repo_home }}/public/{{ publish_endpoint }}/dists"
+  become: true
+  become_user: root
+  when: repo_public != (repo_home + '/public/' + publish_endpoint)
+
+- name: Ensure pool symlink is on website server
+  ansible.builtin.file:
+    path: "{{ repo_public }}/pool"
+    state: link
+    src: "{{ repo_home }}/public/{{ publish_endpoint }}/pool"
+  become: true
+  become_user: root
+  when: repo_public != (repo_home + '/public/' + publish_endpoint)
+
+- name: Ensure media symlink is on website server (for DEP-11)
+  ansible.builtin.file:
+    path: "{{ repo_public }}/media"
+    state: link
+    src: "{{ repo_home }}/public/{{ publish_endpoint }}/media"
+  become: true
+  become_user: root
+  when: repo_public != (repo_home + '/public/' + publish_endpoint)
+
+- name: Copy repository logo to public directory
+  ansible.builtin.copy:
+    src: "{{ repo_logo }}"
+    dest: "{{ repo_public }}/repo-logo{{ repo_logo | splitext | last }}"
+    owner: "{{ repo_user }}"
+    group: "www-data"
+    mode: "0644"
+  become: true
+  become_user: root
+  when: repo_logo is defined
+
+- name: Copy repository badge to public directory
+  ansible.builtin.copy:
+    src: "{{ repo_badge }}"
+    dest: "{{ repo_public }}/repo-badge{{ repo_badge | splitext | last }}"
+    owner: "{{ repo_user }}"
+    group: "www-data"
+    mode: "0644"
+  become: true
+  become_user: root
+  when: repo_badge is defined
+
+- name: Ensure repository parent directories are traversable by web server
+  ansible.builtin.file:
+    path: "{{ item }}"
+    mode: "o+x"
+  loop:
+    - "/var/lib/{{ repo_user }}"
+    - "{{ repo_home | dirname }}"
+  become: true
+  become_user: root
+  when: repo_home is search('/var/lib/')
+
+- name: Ensure public domain directory exists
+  ansible.builtin.file:
+    path: "/var/www/html/{{ repo_domain }}"
+    state: directory
+    mode: "0755"
+    owner: "{{ repo_user }}"
+    group: "www-data"
+  become: true
+  become_user: root
+  when: repo_domain is defined and repo_domain != (repo_public | basename)
+
+- name: Build list of files to sync
+  ansible.builtin.set_fact:
+    sync_files: >-
+      {{ ['index.html', 'README.html', 'KEY.asc', 'KEY.gpg', 'repo.css', 'repo.js', 'placeholder.svg']
+         + (['repo-logo' + (repo_logo | splitext | last)] if repo_logo is defined else [])
+         + (['repo-badge' + (repo_badge | splitext | last)] if repo_badge is defined else []) }}
+
+- name: Sync HTML files and logo to public domain
+  ansible.builtin.copy:
+    src: "{{ repo_public }}/{{ item }}"
+    dest: "/var/www/html/{{ repo_domain }}/{{ item }}"
+    remote_src: yes
+    owner: "{{ repo_user }}"
+    group: "www-data"
+    mode: "0644"
+  loop: "{{ sync_files }}"
+  become: true
+  become_user: root
+  when: repo_domain is defined and repo_domain != (repo_public | basename)
+  ignore_errors: yes
+
+# Optional: syncs package metadata into a MySQL database via the debs2sql
+# tool, for sites that build their own search/browse UI on top of a DB
+# instead of (or alongside) the generated README/index.html. Most setups
+# don't need this — leave debs2sql_enabled unset.
+- name: Sync package metadata into a database via debs2sql
+  when: debs2sql_enabled | default(false)
+  block:
+    - name: Ensure debs2sql is installed
+      ansible.builtin.package:
+        name: debs2sql
+        state: present
+      become: true
+      become_user: root
+      delegate_to: "{{ debs2sql_host | default('localhost') }}"
+
+    - name: Ensure debs2sql config directory exists
+      ansible.builtin.file:
+        path: "/etc/debs2sql"
+        state: directory
+        mode: "0755"
+      become: true
+      become_user: root
+      delegate_to: "{{ debs2sql_host | default('localhost') }}"
+
+    - name: Configure debs2sql for website integration
+      ansible.builtin.copy:
+        dest: "/etc/debs2sql/.env"
+        mode: "0644"
+        content: |
+          APP_DEBUG=false
+          EASE_LOGGER=syslog
+          DB_CONNECTION=mysql
+          DB_HOST={{ debs2sql_db_host | default('127.0.0.1') }}
+          DB_PORT={{ debs2sql_db_port | default('3306') }}
+          DB_DATABASE={{ debs2sql_db_name }}
+          DB_USERNAME={{ debs2sql_db_user | default('debs2sql') }}
+          DB_PASSWORD={{ debs2sql_db_password }}
+          EMAIL_FROM={{ debs2sql_email_from | default('debs2sql@' + repo_domain) }}
+          SEND_INFO_TO={{ repo_admin_email }}
+          REPO_DIR={{ repo_public | dirname }}
+      become: true
+      become_user: root
+      delegate_to: "{{ debs2sql_host | default('localhost') }}"
+
+    - name: Update package database with debs2sql
+      ansible.builtin.command: "/usr/bin/debs2sql"
+      register: debs2sql_result
+      changed_when: debs2sql_result.rc == 0
+      failed_when: false
+      become: true
+      become_user: "{{ repo_user }}"
+      delegate_to: "{{ debs2sql_host | default('localhost') }}"
+
+    - name: Display debs2sql result
+      ansible.builtin.debug:
+        var: debs2sql_result
+
+- name: Set up toot for Mastodon announcements
+  ansible.builtin.include_tasks: "subtask/setup-toot.yml"
+
+- name: Post repository update to Mastodon
+  ansible.builtin.include_tasks: "subtask/post-to-mastodon.yml"
+
+# Automatic repository synchronization to website server
+# Optional: only needed if you build/publish the repo on one host (e.g. a CI
+# runner) and serve it from a separate public-facing web host. Most setups
+# publish directly on the web host and can leave sync_to_website_enabled unset.
+- name: Setup automated repository sync from build host to website
+  when: sync_to_website_enabled | default(false)
+  block:
+    - name: Create log file for repository sync
+      ansible.builtin.file:
+        path: /var/log/repo-sync.log
+        state: touch
+        mode: '0664'
+        owner: "{{ sync_dest_user }}"
+        group: "{{ sync_dest_user }}"
+      become: true
+      become_user: root
+      delegate_to: "{{ sync_dest_host }}"
+
+    - name: Deploy sync script to {{ sync_dest_host }}
+      ansible.builtin.template:
+        src: sync-repo-to-website.sh.j2
+        dest: /usr/local/bin/sync-repo-to-website.sh
+        mode: '0755'
+        owner: "{{ sync_dest_user }}"
+        group: "{{ sync_dest_user }}"
+      become: true
+      become_user: root
+      delegate_to: "{{ sync_dest_host }}"
+
+    - name: Deploy systemd service file
+      ansible.builtin.copy:
+        src: sync-repo-to-website.service
+        dest: /etc/systemd/system/sync-repo-to-website.service
+        mode: '0644'
+      become: true
+      become_user: root
+      delegate_to: "{{ sync_dest_host }}"
+
+    - name: Deploy systemd timer file
+      ansible.builtin.copy:
+        src: sync-repo-to-website.timer
+        dest: /etc/systemd/system/sync-repo-to-website.timer
+        mode: '0644'
+      become: true
+      become_user: root
+      delegate_to: "{{ sync_dest_host }}"
+
+    - name: Reload systemd daemon on {{ sync_dest_host }}
+      ansible.builtin.systemd:
+        daemon_reload: true
+      become: true
+      become_user: root
+      delegate_to: "{{ sync_dest_host }}"
+
+    - name: Enable and start sync timer
+      ansible.builtin.systemd:
+        name: sync-repo-to-website.timer
+        enabled: true
+        state: started
+      become: true
+      become_user: root
+      delegate_to: "{{ sync_dest_host }}"
+
+    - name: Display timer status
+      ansible.builtin.command:
+        cmd: systemctl status sync-repo-to-website.timer --no-pager
+      register: timer_status
+      changed_when: false
+      delegate_to: "{{ sync_dest_host }}"
+      ignore_errors: true
+
+    - name: Display sync timer information
+      ansible.builtin.debug:
+        msg: "Repository sync timer has been configured to run automatically every 1 hour"

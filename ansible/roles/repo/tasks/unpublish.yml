@@ -1,0 +1,22 @@
+---
+- name: Check already Published
+  ansible.builtin.shell:
+    cmd: "aptly publish -raw list | awk ' { t = $1; $1 = $2; $2 = t; print; } '"
+  register: published_raw
+  changed_when: published_raw.rc != 0
+  ignore_errors: true
+
+- name: Use published list as fact
+  ansible.builtin.set_fact:
+    published: "{{ published_raw.stdout_lines | default([]) }}"
+
+- name: Published yet
+  ansible.builtin.debug:
+    var: published
+
+- name: Drop published
+  ansible.builtin.include_tasks: 'subtask/publish-drop.yml'
+  register: dropped
+  loop: "{{ published }}"
+  loop_control:
+    loop_var: publish

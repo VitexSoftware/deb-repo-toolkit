@@ -1,0 +1,71 @@
+---
+- name: "What is my Distro release ? :{{ distro_endpoint }}"
+  ansible.builtin.set_fact:
+    distro_release: "{{ lookup('dict', distro_releases).key }}"
+    distro_repositories: "{{ lookup('dict', distro_releases).value }}"
+
+- name: "Set prepare {{ distro_family + ' ' + distro_release + ': ' + distro_endpoint }}"
+  ansible.builtin.set_fact:
+    repo_name: "{{ distro_release }}-{{ distro_repositories }}"
+
+- name: "Prepare publish {{ distro_release + '-all-' + today }}"
+  ansible.builtin.set_fact:
+    publish: "{{ distro_release }}-all-{{ today }}"
+
+- name: "Snapshots already present {{ distro_release + ': ' + today + ':' + distro_endpoint }}"
+  ansible.builtin.shell:
+    cmd: "aptly snapshot list -raw | grep {{ distro_release }} | grep  {{ distro_endpoint }} | grep '{{ today }}'"
+  register: "snapshots"
+  changed_when: "snapshots.stdout|length > 0"
+  ignore_errors: true
+
+- name: Snapshots :{{ distro_endpoint }}
+  ansible.builtin.debug:
+    var: "snapshots"
+
+- name: "Join {{ distro_release + 'Components :' + distro_endpoint }}"
+  ansible.builtin.set_fact:
+    components: "{{ snapshots.stdout_lines | join(',') | replace('_' + today, '') | replace(distro_release + '-', '') | replace(distro_release, 'main') | replace('-' + distro_endpoint, '') }}"
+    composlist: "main {{ snapshots.stdout_lines | join(',') | replace('_' + today, '') | replace(distro_release + '-', '') | replace(distro_release, 'main') | replace('-' + distro_endpoint, '') }}"
+
+- name: "Components of {{ distro_release }}:"
+  ansible.builtin.debug:
+    var: "components"
+
+- name: Prepare publish command {{ distro_release + ' ' + publish + ':' + distro_endpoint }}
+  ansible.builtin.set_fact:
+    pubcmd: "{{ aptly_bin }} publish snapshot -batch -force-overwrite -gpg-key={{ repo_key }} -architectures={{ repo_architectures | join(',') }} -passphrase-file={{ passphrasefile }} -component={{ components }} -distribution={{ distro_release }} {{ snapshots.stdout_lines | join(' ') }} {{ distro_endpoint }}"
+    distpub: "{{ distro_release + ' ' + distro_endpoint + ':.' }}"
+
+- name: "{{ distro_release + ' Publish Command : ' + distro_endpoint }}"
+  ansible.builtin.debug:
+    var: pubcmd
+
+- name: 'Skip when "{{ distpub }}"'
+  ansible.builtin.debug:
+    var: published
+
+- name: 'Ensure the directory exists: {{ repo_public }}'
+  ansible.builtin.file:
+    path: "{{ repo_public }}"
+    state: directory
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+    mode: "0755"
+  become: true
+
+- name: "Perform publish of {{ distro_release + ': ' + distro_endpoint }}"
+  ansible.builtin.command: "{{ pubcmd }}"
+  args:
+    chdir: "~"
+  register: out
+  when: "distpub not in published and snapshots.stdout_lines | length > 0"
+  environment:
+    TMPDIR: "/tmp"
+    GNUPGHOME: "/var/lib/{{ repo_user }}/.gnupg"
+  changed_when: "out.rc == 0"
+  become_user: "{{ repo_user }}"
+
+- name: "Show {{ distro_release + 'publish result :' + distro_endpoint }}"
+  ansible.builtin.debug:
+    var: out

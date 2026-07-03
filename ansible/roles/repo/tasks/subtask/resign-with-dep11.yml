@@ -1,0 +1,54 @@
+---
+- name: Deploy dep11 Release patcher script
+  ansible.builtin.copy:
+    src: update-release-dep11.py
+    dest: "{{ repo_home }}/update-release-dep11.py"
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+    mode: "0755"
+  become: true
+  become_user: root
+
+- name: Create uncompressed Components.yml from .yml.gz for apt MetaKey matching
+  ansible.builtin.shell: |
+    find {{ repo_home }}/public/{{ publish_endpoint }}/dists -path "*/dep11/Components-*.yml.gz" | while read f; do
+      plain="${f%.gz}"
+      [ -f "${plain}" ] || zcat "${f}" > "${plain}"
+    done
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ repo_user }}"
+  changed_when: true
+  failed_when: false
+
+- name: Re-sign Release with dep11 hashes for each distribution
+  ansible.builtin.shell: |
+    set -e
+    GNUPGHOME="/var/lib/{{ repo_user }}/.gnupg"
+    for dist in {{ distro_list | join(' ') }}; do
+      DIST_DIR="{{ repo_home }}/public/{{ publish_endpoint }}/dists/${dist}"
+      if [ -d "${DIST_DIR}/main/dep11" ] && [ -f "${DIST_DIR}/Release" ]; then
+        echo "Patching InRelease for ${dist}..."
+        python3 {{ repo_home }}/update-release-dep11.py \
+          "${DIST_DIR}" \
+          "${GNUPGHOME}" \
+          "{{ repo_key }}" \
+          "{{ passphrasefile }}"
+      else
+        echo "No dep11 data or Release for ${dist}, skipping re-sign"
+      fi
+    done
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ repo_user }}"
+  environment:
+    GNUPGHOME: "/var/lib/{{ repo_user }}/.gnupg"
+  register: resign_result
+  changed_when: "'Re-signed' in resign_result.stdout"
+  failed_when: resign_result.rc != 0
+
+- name: Show re-sign results
+  ansible.builtin.debug:
+    var: resign_result.stdout_lines

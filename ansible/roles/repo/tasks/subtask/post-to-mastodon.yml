@@ -1,0 +1,321 @@
+---
+- name: Check if toot is available
+  ansible.builtin.command: which toot
+  register: toot_check
+  failed_when: false
+  changed_when: false
+
+- name: Find today's snapshot metadata files
+  ansible.builtin.find:
+    paths: "{{ repo_home }}/.snapshot-metadata"
+    patterns: "*_{{ today }}.json"
+    file_type: file
+  register: today_metadata_files
+  become_user: "{{ repo_user }}"
+  when: toot_check.rc == 0
+
+- name: Exclude hidden distros from today's snapshot metadata
+  ansible.builtin.set_fact:
+    today_metadata_files: >-
+      {{ today_metadata_files | combine({'files':
+         today_metadata_files.files |
+         rejectattr('path', 'search', '/(' ~ (hidden_distros | default(['ilegal']) | join('|')) ~ ')-') |
+         list}) }}
+  when: toot_check.rc == 0 and today_metadata_files.matched > 0 and hidden_distros | default([]) | length > 0
+
+- name: Find previous snapshot metadata files
+  ansible.builtin.find:
+    paths: "{{ repo_home }}/.snapshot-metadata"
+    patterns: "*_previous.json"
+    file_type: file
+  register: previous_metadata_files_found
+  become_user: "{{ repo_user }}"
+  when: toot_check.rc == 0 and today_metadata_files.matched > 0
+
+- name: Exclude hidden distros from previous snapshot metadata
+  ansible.builtin.set_fact:
+    previous_metadata_files_found: >-
+      {{ previous_metadata_files_found | combine({'files':
+         previous_metadata_files_found.files |
+         rejectattr('path', 'search', '/(' ~ (hidden_distros | default(['ilegal']) | join('|')) ~ ')-') |
+         list}) }}
+  when: toot_check.rc == 0 and (previous_metadata_files_found.matched | default(0)) > 0 and hidden_distros | default([]) | length > 0
+
+- name: Set previous metadata files list
+  ansible.builtin.set_fact:
+    previous_metadata_files: "{{ previous_metadata_files_found.files | map(attribute='path') | list }}"
+  when: toot_check.rc == 0 and (previous_metadata_files_found.matched | default(0)) > 0
+- name: Compare package lists to find new/updated packages
+  ansible.builtin.shell:
+    cmd: |
+      today_files=({{ today_metadata_files.files | map(attribute='path') | map('quote') | join(' ') }})
+      {% if previous_metadata_files is defined and previous_metadata_files | length > 0 %}
+      previous_files=({{ previous_metadata_files | map('quote') | join(' ') }})
+      {% else %}
+      previous_files=()
+      {% endif %}
+      {% raw %}
+      # Merge all today's packages into one JSON
+      today_packages=$(jq -s 'add | unique_by(.name) | sort_by(.name)' "${today_files[@]}" 2>/dev/null || echo '[]')
+      
+      if [ ${#previous_files[@]} -gt 0 ]; then
+        # Merge all previous packages
+        previous_packages=$(jq -s 'add | unique_by(.name) | sort_by(.name)' "${previous_files[@]}" 2>/dev/null || echo '[]')
+        
+        # Find new or updated packages (different version).
+        # Normalize versions by stripping the ~distro suffix before comparing
+        # so that 3.6.0.322~noble and 3.6.0.322~bookworm are treated as equal.
+        jq -n -r --argjson today "$today_packages" --argjson previous "$previous_packages" '
+          def norm: gsub("~[a-z][a-z0-9]*$"; "");
+          ($today    | map({(.name): (.version | norm)}) | add) as $t_map |
+          ($previous | map({(.name): (.version | norm)}) | add) as $p_map |
+          $today | map(select(
+            ($p_map[.name] // "") != (.version | norm)
+          )) | .[] | "\(.name) \(.version)"' | head -60
+      else
+        # No previous data, show all today's packages
+        echo "$today_packages" | jq -r '.[] | "\(.name) \(.version)"' | head -60
+      fi
+      {% endraw %}
+    executable: /bin/bash
+  register: package_changes
+  changed_when: false
+  failed_when: false
+  become_user: "{{ repo_user }}"
+  environment:
+    HOME: "/var/lib/{{ repo_user }}"
+  when: toot_check.rc == 0 and today_metadata_files.matched > 0
+- name: Set new_packages list
+  ansible.builtin.set_fact:
+    new_packages: "{{ package_changes.stdout_lines | default([]) }}"
+  when: toot_check.rc == 0 and package_changes.stdout_lines is defined
+
+- name: Find package icons from DEP-11 metadata
+  ansible.builtin.shell:
+    cmd: |
+      dep11_dir="{{ repo_home }}/asgen/export/data"
+      media_dir="{{ repo_home }}/asgen/export/media"
+
+      if [ ! -d "$dep11_dir" ]; then
+        exit 0
+      fi
+
+      packages=({{ new_packages | map('regex_replace', '^([^ ]+) .*$', '\1') | join(' ') }})
+
+      found=0
+      for pkg in "${packages[@]}"; do
+        if [ $found -ge 4 ]; then
+          break
+        fi
+
+        # Resolve the current icon via Components-amd64.yml.gz (authoritative hash).
+        # awk parses the YAML stream: finds Package -> Icon -> remote -> url.
+        # The remote.url contains the current content-hash dir, so stale icons
+        # from old hash dirs are never picked. No Python/PyYAML required.
+        icon_path=""
+        for yml_gz in $(find "$dep11_dir" -name 'Components-amd64.yml.gz' 2>/dev/null | sort); do
+          icon_url=$(zcat "$yml_gz" 2>/dev/null | awk -v pkg="$pkg" '
+            /^---/         { in_pkg=0; in_icon=0; in_remote=0 }
+            /^Package: /   { in_pkg=($2==pkg); in_icon=0; in_remote=0; next }
+            in_pkg && /^Icon:/       { in_icon=1; next }
+            in_pkg && in_icon && /^  remote:/ { in_remote=1; next }
+            in_pkg && in_remote && /^  - url: / { print $3; exit }
+            in_pkg && /^[A-Za-z]/   { in_icon=0; in_remote=0 }
+          ')
+          if [ -n "$icon_url" ]; then
+            candidate="${media_dir}/${icon_url}"
+            if [ -f "$candidate" ]; then
+              icon_path="$candidate"
+              break
+            fi
+          fi
+        done
+
+        # Last-resort: scan media dirs by package name prefix in the media dir
+        if [ -z "$icon_path" ]; then
+          for size in 128x128 64x64 48x48; do
+            icon_path=$(find "$media_dir" -path "*/icons/${size}/${pkg}_*.png" 2>/dev/null | sort | head -1)
+            [ -n "$icon_path" ] && break
+          done
+        fi
+
+        if [ -n "$icon_path" ] && [ -f "$icon_path" ]; then
+          echo "$icon_path"
+          found=$((found + 1))
+        fi
+      done
+    executable: /bin/bash
+  register: package_icons
+  changed_when: false
+  failed_when: false
+  become_user: "{{ repo_user }}"
+  environment:
+    HOME: "/var/lib/{{ repo_user }}"
+  when: toot_check.rc == 0 and new_packages is defined and new_packages | length > 0
+
+- name: Generate Mastodon post content with package details
+  ansible.builtin.shell:
+    cmd: |
+      python3 << 'PYEOF'
+      import json, subprocess, sys, os, glob, gzip
+      from os.path import dirname
+
+      new_packages = json.loads('{{ new_packages | default([]) | to_json }}')
+      repo_domain  = '{{ repo_domain }}'
+      repo_public  = '{{ repo_public }}'
+      distro_count = {{ distro_list | default([]) | length }}
+      home         = '/var/lib/{{ repo_user }}'
+
+      def package_meta():
+          """Map package name -> {github, pool_dir} parsed from the published
+          Packages indices. github prefers Vcs-Browser, then Vcs-Git (sans .git),
+          then Homepage, accepting only github.com URLs; pool_dir is the
+          dirname of the Filename field (e.g. pool/main/m/multiflexi-doc)."""
+          info = {}
+          paths  = sorted(glob.glob(os.path.join(repo_public, 'dists', '**', 'Packages'), recursive=True))
+          paths += sorted(glob.glob(os.path.join(repo_public, 'dists', '**', 'Packages.gz'), recursive=True))
+          for p in paths:
+              try:
+                  opener = gzip.open(p, 'rt', errors='replace') if p.endswith('.gz') else open(p, errors='replace')
+                  with opener as fh:
+                      data = fh.read()
+              except OSError:
+                  continue
+              for stanza in data.split('\n\n'):
+                  fields = {}
+                  for ln in stanza.splitlines():
+                      if ln[:1] in (' ', '\t') or ':' not in ln:
+                          continue
+                      k, _, v = ln.partition(':')
+                      fields[k.strip()] = v.strip()
+                  name = fields.get('Package')
+                  if not name:
+                      continue
+                  gh = fields.get('Vcs-Browser')
+                  if not gh and fields.get('Vcs-Git'):
+                      vg = fields['Vcs-Git']
+                      gh = vg[:-4] if vg.endswith('.git') else vg
+                  if not gh:
+                      gh = fields.get('Homepage')
+                  if gh and 'github.com' not in gh:
+                      gh = None
+                  fn = fields.get('Filename')
+                  cur = info.setdefault(name, {'github': None, 'pool_dir': None})
+                  if gh and not cur['github']:
+                      cur['github'] = gh
+                  if fn and not cur['pool_dir']:
+                      cur['pool_dir'] = dirname(fn)
+          return info
+
+      def build_number(line):
+          """Sort key: Jenkins build number (last numeric segment before ~distro).
+          Each project's build counter grows over time, so highest = most recently built."""
+          parts = line.strip().split(' ', 1)
+          ver = (parts[1] if len(parts) > 1 else '0').split('~')[0]
+          segs = ver.split('.')
+          try:
+              return int(segs[-1])
+          except (ValueError, IndexError):
+              return 0
+
+      sorted_pkgs = sorted(new_packages, key=build_number, reverse=True)
+      pkg_info = package_meta()
+
+      lines = [f'🎉 Repository updated: {repo_domain}', '']
+      if sorted_pkgs:
+          lines.append('📦 New/Updated packages (newest first):')
+          pool_emitted = False
+          for pkg in sorted_pkgs[:30]:
+              parts = pkg.strip().split(' ', 1)
+              name  = parts[0]
+              ver   = parts[1] if len(parts) > 1 else ''
+              lines.append(f'• {name} {ver}')
+              meta = pkg_info.get(name, {})
+              if meta.get('github'):
+                  lines.append(f"  {meta['github']}")
+              # Repo pool listing link only on the first package, to save space
+              if not pool_emitted and meta.get('pool_dir'):
+                  lines.append(f"  http://{repo_domain}/{meta['pool_dir']}/")
+                  pool_emitted = True
+          if len(sorted_pkgs) > 30:
+              lines.append(f'… and {len(sorted_pkgs) - 30} more')
+      else:
+          lines.append(f'📦 {distro_count} distributions available')
+
+      lines += ['', f'🔗 http://{repo_domain}/', '', '#Debian #Ubuntu #Repository #OpenSource']
+      print('\n'.join(lines))
+      PYEOF
+    executable: /bin/bash
+  register: mastodon_post_raw
+  changed_when: false
+  failed_when: false
+  become_user: "{{ repo_user }}"
+  environment:
+    HOME: "/var/lib/{{ repo_user }}"
+  when: toot_check.rc == 0 and distro_list is defined
+
+- name: Set mastodon_post fact from generated content
+  ansible.builtin.set_fact:
+    mastodon_post: "{{ mastodon_post_raw.stdout }}"
+  when: toot_check.rc == 0 and mastodon_post_raw.stdout is defined and mastodon_post_raw.stdout | length > 0
+
+- name: Display toot content for CI/CD logs
+  ansible.builtin.debug:
+    msg: |
+      ========================================
+      MASTODON POST CONTENT:
+      ========================================
+      {{ mastodon_post }}
+      ========================================
+  when: toot_check.rc == 0 and mastodon_post is defined
+
+- name: Prepare toot command with media attachments
+  ansible.builtin.set_fact:
+    toot_media_args: >-
+      {{
+        (package_icons.stdout_lines | default([]))[:4] |
+        map('regex_replace', '^(.*)$', '-m \1') |
+        join(' ')
+      }}
+  when: toot_check.rc == 0 and package_icons.stdout_lines is defined and package_icons.stdout_lines | length > 0
+
+- name: Display media attachments for CI/CD logs
+  ansible.builtin.debug:
+    msg: "Media attachments: {{ package_icons.stdout_lines | default([]) | list }}"
+  when: toot_check.rc == 0 and package_icons.stdout_lines is defined and package_icons.stdout_lines | length > 0
+
+- name: Post to Mastodon with images
+  ansible.builtin.shell:
+    cmd: |
+      cat <<'TOOT_EOF' | toot post -v unlisted {{ toot_media_args | default('') }}
+      {{ mastodon_post }}
+      TOOT_EOF
+    executable: /bin/bash
+  register: toot_result
+  changed_when: toot_result.rc == 0
+  failed_when: false
+  become_user: "{{ repo_user }}"
+  when: toot_check.rc == 0 and mastodon_post is defined and toot_media_args is defined and toot_media_args | length > 0
+
+- name: Post to Mastodon without images
+  ansible.builtin.shell:
+    cmd: |
+      cat <<'TOOT_EOF' | toot post -v unlisted
+      {{ mastodon_post }}
+      TOOT_EOF
+    executable: /bin/bash
+  register: toot_result_no_media
+  changed_when: toot_result_no_media.rc == 0
+  failed_when: false
+  become_user: "{{ repo_user }}"
+  when: toot_check.rc == 0 and mastodon_post is defined and (toot_media_args is not defined or toot_media_args | length == 0) and (toot_result is not defined or toot_result.skipped | default(false))
+
+- name: Display toot result
+  ansible.builtin.debug:
+    msg: |
+      ========================================
+      MASTODON POST RESULT:
+      ========================================
+      {{ (toot_result.stdout if toot_result.skipped is not defined else toot_result_no_media.stdout) if (toot_result.skipped is not defined or toot_result_no_media.skipped is not defined) else 'Skipped - toot not available or post failed' }}
+      ========================================
+  when: (toot_result is defined and toot_result.skipped is not defined) or (toot_result_no_media is defined and toot_result_no_media.skipped is not defined)

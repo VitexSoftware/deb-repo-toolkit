@@ -1,0 +1,16 @@
+---
+- name: Reload systemd and enable timer
+  block:
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: true
+      become: true
+      become_user: root
+
+    - name: Restart sync timer
+      ansible.builtin.systemd:
+        name: sync-repo-to-website.timer
+        enabled: true
+        state: restarted
+      become: true
+      become_user: root

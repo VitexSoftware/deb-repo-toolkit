@@ -1,0 +1,40 @@
+# defaults file for aptly
+today: "{{ ansible_date_time.date }}"
+repo_name: "Ansible managed DEB repository"
+# repo_user: "jenkins"
+# repo_home: "/mnt/aptly"
+# repo_public: "/var/lib/jenkins/workspace/RebuildDebRepo/public"
+# repo_admin_email: "admin@example.com"
+aptly_bin: "aptly"
+
+repo_keyword: "define_me"
+
+# base_url used for apt sources snippets defaults to http://{{ repo_domain }}.
+# Override per publish_endpoint here if some of your endpoints are served
+# from a different domain/scheme, e.g.:
+# endpoint_base_urls:
+#   myrepo: "http://repo.example.com"
+#   other-endpoint: "https://repo2.example.org"
+endpoint_base_urls: {}
+
+repos:
+
+repo_architectures:
+  - amd64
+  - i386
+  - arm64
+  - armel
+  - armhf
+  - mips
+  - mipsel
+
+hidden_distros: []
+
+# Optional two-host publishing (build/aptly host -> separate public web
+# host), used by tasks/publish.yml's "sync repository to website" block.
+# Leave sync_to_website_enabled false (default) if you publish directly on
+# the web host, which is the common case.
+sync_to_website_enabled: false
+# sync_source_host: "{{ inventory_hostname }}"
+# sync_dest_host: "web.example.com"
+# sync_dest_user: "deploy"

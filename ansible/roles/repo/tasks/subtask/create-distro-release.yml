@@ -1,0 +1,23 @@
+---
+- name: What releases ?
+  ansible.builtin.debug:
+    var: distro_releases
+
+- name: "What is my Distro release ?"
+  ansible.builtin.set_fact:
+    distro_release: "{{ lookup('dict', distro_releases).key }}"
+
+- name: Main is default component
+  ansible.builtin.set_fact:
+    components: "{{ ['main'] }}"
+
+- name: Is there any components
+  ansible.builtin.set_fact:
+    components: "{{ ['main'] + lookup('dict', distro_releases).value }}"
+  when: "lookup('dict', distro_releases).value is not none and (lookup('dict', distro_releases).value | length) > 0"
+
+- name: "Create Distro Repositories for {{ distro_release }}"
+  ansible.builtin.include_tasks: 'subtask/create-distro-repositories.yml'
+  loop: "{{ components }}"
+  loop_control:
+    loop_var: distro_repositories

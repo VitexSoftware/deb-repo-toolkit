@@ -1,0 +1,12 @@
+<html>
+    <head>
+        <title>{{ repo }}</title>
+    </head>
+    <body>
+<ul>
+{%- for package in repo_info.Packages %}
+    <li><a href="">{{ package -}}.deb</a></li>
+{% endfor %}
+</ul>
+    </body>
+</html>

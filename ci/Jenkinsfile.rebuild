@@ -1,0 +1,59 @@
+// Example Jenkins pipeline: rebuild and republish the apt repository.
+//
+// All the actual work (aptly publish, DEP-11/AppStream icon generation,
+// GPG signing, package-browser HTML generation) lives in the "repo" Ansible
+// role — this pipeline just checks it out and runs it. Point it at your own
+// copy of ../ansible with your own vars file (see ansible/vars/example-repo.yml).
+//
+// Wire this up as a Jenkins job (or adapt the same two steps into GitLab CI /
+// GitHub Actions / any other runner) and trigger it whenever new .debs land
+// in your aptly repos.
+
+pipeline {
+    agent any
+
+    environment {
+        // Directory on the Jenkins agent that holds a checkout of this
+        // toolkit's ansible/ directory (or your own fork of it).
+        WORKDIR = '/var/lib/jenkins/workspace/rebuild-deb-repo'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                git credentialsId: 'REPLACE_WITH_YOUR_CREDENTIALS_ID',
+                    url: 'REPLACE_WITH_YOUR_GIT_URL/deb-repo-toolkit.git'
+            }
+        }
+
+        stage('Republish repository') {
+            steps {
+                dir('ansible') {
+                    sh '''
+                        ansible-playbook \
+                            --extra-vars "repo_user=jenkins" \
+                            -e @vars/example-repo.yml \
+                            playbooks/example-repo-publish.yml
+                    '''
+                }
+            }
+        }
+
+        stage('Verify') {
+            steps {
+                sh '''
+                    echo "Repository republish finished — check your repo_public path and repo_domain for the updated package browser."
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Repository rebuild #${env.BUILD_NUMBER} succeeded."
+        }
+        failure {
+            echo "Repository rebuild #${env.BUILD_NUMBER} failed — check the Ansible output above."
+        }
+    }
+}

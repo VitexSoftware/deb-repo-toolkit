@@ -1,0 +1,10 @@
+---
+# Snapshots today's aptly repo contents ahead of publishing. Run before
+# example-repo-publish.yml if you want each publish to pin a reproducible
+# snapshot rather than publishing directly from the live repo.
+- name: Apt repository snapshotter
+  hosts: localhost
+  vars_files:
+    - example-repo.yml
+  roles:
+    - { role: repo, repo_action: snapshot }

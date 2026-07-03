@@ -1,0 +1,115 @@
+---
+- name: Derive publish endpoint name from repos list
+  ansible.builtin.set_fact:
+    publish_endpoint: "{{ (repos | first) | dict2items | first | json_query('key') }}"
+
+- name: Ensure base directory exists for {{ repo_user }}
+  ansible.builtin.file:
+    path: "/var/lib/{{ repo_user }}"
+    state: directory
+    mode: "0750"
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+  become: true
+  become_user: root
+
+- name: Ensure aptly home exists for {{ repo_user }}
+  ansible.builtin.file:
+    path: "/var/lib/{{ repo_user }}/.aptly"
+    state: directory
+    mode: "0750"
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+  become: true
+  become_user: root
+
+- name: Configure aptly with proper settings
+  ansible.builtin.template:
+    src: aptly.conf.j2
+    dest: "/etc/aptly.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  become_user: root
+
+- name: Ensure user aptly config symlink exists
+  ansible.builtin.file:
+    src: "/etc/aptly.conf"
+    dest: "/var/lib/{{ repo_user }}/.aptly.conf"
+    state: link
+    owner: "{{ repo_user }}"
+    group: "{{ repo_user }}"
+    force: yes
+  become: true
+  become_user: root
+
+- name: Repos already present
+  ansible.builtin.command: "aptly repo list -raw"
+  register: repos_present_raw
+  changed_when: false
+  become_user: "{{ repo_user }}"
+  environment:
+    HOME: "/var/lib/{{ repo_user }}"
+
+- name: Set initial repos we got list
+  ansible.builtin.set_fact:
+    repos_we_got: "{{ repos_present_raw.stdout_lines }}"
+
+- name: Create missing repositories before snapshotting
+  ansible.builtin.include_tasks: "subtask/create-distro-endpoint.yml"
+  loop: "{{ repos }}"
+  loop_control:
+    loop_var: distro_endpoints
+
+- name: Refresh repository list after creation
+  ansible.builtin.command: "aptly repo list -raw"
+  register: repos_present_refreshed
+  changed_when: false
+  become_user: "{{ repo_user }}"
+  environment:
+    HOME: "/var/lib/{{ repo_user }}"
+
+- name: Check already Published
+  ansible.builtin.shell:
+    cmd: "aptly publish -raw list | awk ' { t = $1; $1 = $2; $2 = t; print; } '"
+  register: published_raw
+  changed_when: published_raw.rc != 0
+  ignore_errors: true
+  become_user: "{{ repo_user }}"
+  environment:
+    HOME: "/var/lib/{{ repo_user }}"
+
+- name: Check todays Snapshots
+  ansible.builtin.shell:
+    cmd: "aptly snapshot -raw list | grep  {{ today }}"
+  register: snapshots_raw
+  changed_when: snapshots_raw.rc != 0
+  ignore_errors: true
+  become_user: "{{ repo_user }}"
+  environment:
+    HOME: "/var/lib/{{ repo_user }}"
+
+- name: Use published list as fact
+  ansible.builtin.set_fact:
+    published: "{{ published_raw.stdout_lines if published_raw.stdout_lines is iterable else [] }}"
+
+- name: Update repos we got after creation
+  ansible.builtin.set_fact:
+    repos_we_got: "{{ repos_present_refreshed.stdout_lines }}"
+
+- name: Set snapshots today list
+  ansible.builtin.set_fact:
+    snapshots_today: "{{ snapshots_raw.stdout_lines if snapshots_raw.stdout_lines is defined else [] }}"
+
+- name: Snapshot Distributions
+  ansible.builtin.include_tasks: "subtask/snapshot-distro-endpoint.yml"
+  loop: "{{ repos }}"
+  loop_control:
+    loop_var: distro_endpoints
+# - name: Update Repo graph
+#   command:
+#     cmd: "aptly graph -format=svg -output={{ repo_public }}/repograph.svg"
+#   register: ret
+#   changed_when: "'Output saved to ' in ret.stdout"
+#   become_user: '{{ repo_user }}'

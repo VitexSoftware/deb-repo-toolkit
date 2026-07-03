@@ -1,0 +1,22 @@
+---
+- name: Ensure we have acl package installed
+  ansible.builtin.package:
+    name: acl
+    state: present
+  become: true
+
+- name: Ensure aptly binary is installed
+  ansible.builtin.package:
+    name: aptly
+    state: present
+  become: true
+
+- name: Export gpg public key
+  ansible.builtin.shell:
+    cmd: "gpg --export --armor {{ gpg_key_id }} > {{ repo_public }}/gpg.key"
+  register: ret
+  changed_when: ret.rc != 0
+  become_user: '{{ repo_user }}'
+  become: true
+
+  #gpg --armor --output /var/www/repo.multiflexi.eu/apt.gpg --export  046AE591C4F81D35B80B132C02C52CF78F30A778

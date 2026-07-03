@@ -1,0 +1,20 @@
+{
+    "active_user": "{{ mastodon_username }}@{{ mastodon_instance }}",
+    "apps": {
+{% if mastodon_client_id is defined and mastodon_client_id | length > 0 %}
+        "{{ mastodon_instance }}": {
+            "base_url": "https://{{ mastodon_instance }}",
+            "client_id": "{{ mastodon_client_id }}",
+            "client_secret": "{{ mastodon_client_secret | default('') }}",
+            "instance": "{{ mastodon_instance }}"
+        }
+{% endif %}
+    },
+    "users": {
+        "{{ mastodon_username }}@{{ mastodon_instance }}": {
+            "access_token": "{{ mastodon_access_token }}",
+            "instance": "{{ mastodon_instance }}",
+            "username": "{{ mastodon_username }}"
+        }
+    }
+}
