@@ -50,7 +50,11 @@ def call(String repoSuffix = 'myrepo', String repoBaseUrl = 'https://repo.exampl
     // Example package -> component routing — replace with your own package
     // names, or swap this for a lookup against your build metadata.
     def gamesPkgs = ['example-game-one', 'example-game-two']
-    def backportsPkgs = ['example-backport-one', 'example-backport-two']
+    // python3-opentelemetry-proto intentionally shadows/overrides Debian's own
+    // stale archive package (candidate 1.5.0, incompatible with the newer
+    // opentelemetry-sdk we depend on elsewhere) - routed to backports so the
+    // override is opt-in per host rather than winning apt resolution repo-wide.
+    def backportsPkgs = ['example-backport-one', 'example-backport-two', 'python3-opentelemetry-proto']
 
     // Write toot header immediately; entries are appended via sh to avoid
     // CPS closure issues with mutable Groovy collections inside .each.
